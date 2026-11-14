@@ -286,6 +286,26 @@ std::string ResolvePath(const std::string& xbox_path, uint32_t root_handle) {
         }
         s = e + 1;
     }
+    // MC3 (2026-11-14): five of the disc's loading screens have names of 43 to 45 characters
+    // (flash\loadscreen_career_tournament_SDCompound.xbck, ...tokyo_TKSportsBikeClub.xbck), past the 42 a FATX drive
+    // (the 360's HDD and USB drives) can hold, so a copy of the game there loses them. When the long name is not
+    // there, the short ones the community renamed them to are tried: loadscreen_ca_ and loadscreen_car_.
+    {
+        static const char kLong[] = "loadscreen_career_";
+        std::string low = out;
+        for (size_t i = 0; i < low.size(); i++) low[i] = char(tolower(uint8_t(low[i])));
+        size_t at = low.rfind(kLong);
+        if (at != std::string::npos && GetFileAttributesA(out.c_str()) == DWORD(-1)) {
+            static const char* const kShort[] = {"loadscreen_ca_", "loadscreen_car_"};
+            for (int i = 0; i < 2; i++) {
+                std::string alt = out.substr(0, at) + kShort[i] + out.substr(at + sizeof(kLong) - 1);
+                if (GetFileAttributesA(alt.c_str()) != DWORD(-1)) {
+                    LOG_FIRST(8, "files: %s not there, using %s", out.c_str() + at, alt.c_str() + at);
+                    return alt;
+                }
+            }
+        }
+    }
     return out;
 }
 

@@ -73,6 +73,8 @@ O jogo foi feito para 30 fps no Xbox original. Aqui o limite é o processador: o
 3. Abra o `default.xex` pelo Aurora, FreeStyle Dash ou XeXMenu.
 4. Os saves ficam em `hdd`, dentro da pasta do jogo. O log é salvo como `mc3_360.log` na mesma pasta.
 
+Cinco telas de carregamento do disco têm nomes de arquivo maiores que os 42 caracteres que os drives do 360 aceitam (`flash\loadscreen_career_tournament_SDCompound.xbck` e outras), então a cópia para o HD ou um pendrive pode perdê-las. Se você renomeá-las trocando `loadscreen_career_` por `loadscreen_ca_` (por exemplo `loadscreen_ca_tournament_SDCompound.xbck`), o port as encontra pelo nome curto.
+
 Back + Start por 2 segundos volta para o dashboard.
 
 ## Arquivos de opção
