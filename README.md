@@ -73,7 +73,19 @@ The game was made for 30 fps on the original Xbox. Here the CPU is the limit: th
 3. Launch `default.xex` from Aurora, FreeStyle Dash or XeXMenu.
 4. Saves go to `hdd` inside the game folder. The log is saved as `mc3_360.log` in the same folder.
 
-Five loading screens on the disc have file names longer than the 42 characters the 360's drives allow (`flash\loadscreen_career_tournament_SDCompound.xbck` and others), so a copy to the HDD or a USB drive can lose them. If you rename them to start with `loadscreen_ca_` instead of `loadscreen_career_` (for example `loadscreen_ca_tournament_SDCompound.xbck`), the port finds them under the short name.
+### Five files with names too long for the HDD
+
+The 360's HDD and USB drives accept file names of up to 42 characters. Five loading screens in the game's `flash` folder have longer names, so the copy can fail or skip them. Rename them once, by hand, in the `flash` folder of your copy (on the PC, before copying, is easiest). The port finds them under the short name:
+
+| Original name (in `flash`) | Rename to |
+|---|---|
+| `loadscreen_career_tournament_AtlDubOne.xbck` | `loadscreen_ca_tournament_AtlDubOne.xbck` |
+| `loadscreen_career_tournament_AtlDubTwo.xbck` | `loadscreen_ca_tournament_AtlDubTwo.xbck` |
+| `loadscreen_career_tournament_DetMuscle.xbck` | `loadscreen_ca_tournament_DetMuscle.xbck` |
+| `loadscreen_career_tournament_SDCompound.xbck` | `loadscreen_ca_tournament_SDCompound.xbck` |
+| `loadscreen_career_tokyo_TKSportsBikeClub.xbck` | `loadscreen_ca_tokyo_TKSportsBikeClub.xbck` |
+
+Without them the game still works: only those loading screens don't show.
 
 Back + Start held for 2 seconds returns to the dashboard.
 

@@ -73,7 +73,19 @@ O jogo foi feito para 30 fps no Xbox original. Aqui o limite é o processador: o
 3. Abra o `default.xex` pelo Aurora, FreeStyle Dash ou XeXMenu.
 4. Os saves ficam em `hdd`, dentro da pasta do jogo. O log é salvo como `mc3_360.log` na mesma pasta.
 
-Cinco telas de carregamento do disco têm nomes de arquivo maiores que os 42 caracteres que os drives do 360 aceitam (`flash\loadscreen_career_tournament_SDCompound.xbck` e outras), então a cópia para o HD ou um pendrive pode perdê-las. Se você renomeá-las trocando `loadscreen_career_` por `loadscreen_ca_` (por exemplo `loadscreen_ca_tournament_SDCompound.xbck`), o port as encontra pelo nome curto.
+### Cinco arquivos com nome longo demais para o HD
+
+O HD e os pendrives do 360 aceitam nomes de arquivo de até 42 caracteres. Cinco telas de carregamento da pasta `flash` do jogo têm nomes maiores, então a cópia pode falhar ou pular esses arquivos. Renomeie os cinco uma vez, à mão, na pasta `flash` da sua cópia (o mais fácil é no PC, antes de copiar). O port os encontra pelo nome curto:
+
+| Nome original (em `flash`) | Renomeie para |
+|---|---|
+| `loadscreen_career_tournament_AtlDubOne.xbck` | `loadscreen_ca_tournament_AtlDubOne.xbck` |
+| `loadscreen_career_tournament_AtlDubTwo.xbck` | `loadscreen_ca_tournament_AtlDubTwo.xbck` |
+| `loadscreen_career_tournament_DetMuscle.xbck` | `loadscreen_ca_tournament_DetMuscle.xbck` |
+| `loadscreen_career_tournament_SDCompound.xbck` | `loadscreen_ca_tournament_SDCompound.xbck` |
+| `loadscreen_career_tokyo_TKSportsBikeClub.xbck` | `loadscreen_ca_tokyo_TKSportsBikeClub.xbck` |
+
+Sem eles o jogo funciona normalmente: só essas telas de carregamento não aparecem.
 
 Back + Start por 2 segundos volta para o dashboard.
 
