@@ -1,0 +1,45 @@
+Third party work used in this port
+
+1. MidnightClub3-Port (https://github.com/christiand0797/MidnightClub3-Port), MIT License, Copyright (c) 2026 TGP482.
+   The Windows port of the same game, used as the reference for many fixes. x360/runtime/game/mc3_timing.cpp
+   (fixed step clock and replays), mc3_career.cpp (career events), mc3_lod.cpp (level of detail) and mc3_world.cpp
+   (traffic density) are adapted from its templates/game/src/game files. Parts of x360/runtime/gpu (the depth copy,
+   signed blends, masked clears, visibility tests), x360/runtime/xdk/d3d8.cpp (pushed vertex constants),
+   x360/runtime/xdk/dsound.cpp and x360/runtime/kernel/files.cpp follow its runtime. Several function addresses in
+   pc-recomp/config/game.toml come from it and are marked there.
+
+   MIT License
+
+   Copyright (c) 2026 TGP482
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+2. mc3port (SickSartori), MIT License.
+   The WMA music decoder fix in x360/runtime/game/mc3.cpp (an overlap-add loop with a block count of 0) follows the
+   cause it found. The bytes were checked again in this XBE.
+
+3. JSRF Unleashed (https://github.com/JuMatt/JetSetRadioFuture-Unleashed), MIT License, Copyright (c) 2026 sp00nz.
+   The runtime comes from my Jet Set Radio Future port, where the idea of running one game thread at a time
+   (x360/runtime/kernel/guestlock.cpp) came from this project.
+
+4. XboxXBE-Recomp (https://github.com/TGP482/XboxXBE-Recomp) and BloodyRoarExtremeRecomp
+   (https://github.com/bromurok/BloodyRoarExtremeRecomp), MIT License.
+   The recompiler in pc-recomp/sdk and the base of the Xbox 360 runtime. Licenses in pc-recomp.
+
+5. Zydis and toml++, downloaded by CMake when the PC tools are built (x360/tools/CMakeLists.txt), MIT License.
