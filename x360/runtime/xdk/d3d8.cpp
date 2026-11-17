@@ -81,6 +81,25 @@ const uint32_t kStageStates = XDK_TextureState_Stage, kStreamSize = XDK_Stream_S
 gpu::State g_state;
 std::unique_ptr<gpu::Backend> g_backend;
 std::recursive_mutex g_lock;
+// MC3 (2026-11-16): how every D3D HLE body takes g_lock. Console, 2026-11-16: the title froze loading a race, inside
+// D3D_BlockOnResource waiting for g_lock, with loader threads waiting for the guest lock. A thread holding g_lock in an
+// HLE body (SetTexture, ~2,400 calls a frame, calls the guest's D3D_InternalAddRef/Release) handed the guest lock over
+// at that guest call (x86_icall -> GuestYield) and then waited for it back, while the title, holding the guest lock,
+// waited for g_lock. Now no hand over happens while g_lock is held (NoYield), and a thread that finds g_lock taken
+// lets the guest lock go while it waits, so the holder can always finish.
+struct D3dLock {
+    kernel::NoYield no_yield_;
+    D3dLock() {
+        if (!g_lock.try_lock()) {
+            kernel::GuestUnlock unlocked;
+            g_lock.lock();
+        }
+    }
+    ~D3dLock() { g_lock.unlock(); }
+private:
+    D3dLock(const D3dLock&);
+    D3dLock& operator=(const D3dLock&);
+};
 
 std::unordered_map<uint32_t, std::shared_ptr<gpu::VertexShader>> g_vs;
 std::unordered_map<uint32_t, std::shared_ptr<gpu::PixelShader>> g_ps;
@@ -280,7 +299,7 @@ uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp) {
 
 // gpu::MarkDirty from the title's threads: to the renderer in order with the draws recorded before it
 void DirtyToBackend(uint32_t data) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     if (g_backend) g_backend->Dirty(data);
     else gpu::MarkDirtyData(data);
 }
@@ -428,7 +447,7 @@ void VerticalBlank(X86Context& ctx) {
 gpu::State& State() { return g_state; }
 std::recursive_mutex& Lock() { return g_lock; }
 void MoviePresent() {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     if (g_backend && g_buffers[1]) g_backend->Present(SurfaceOf(g_buffers[1]));
 }
 
@@ -449,7 +468,7 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
                 XDK_KEY(CDevice_FrontBuffer), XDK_KEY(CDevice_SwapCount), XDK_KEY(CDevice_Size),
                 XDK_KEY(DirtyFlags_Texture), XDK_KEY(TextureState_Stage), XDK_KEY(Stream_Size),
                 XDK_KEY(Stream_Stride), XDK_KEY(Stream_Buffer));
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t pp = a[4];  // D3DPRESENT_PARAMETERS
     uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
     uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24), interval = R32(pp + 0x30);
@@ -522,7 +541,7 @@ HLE_STDCALL(D3DDevice_Release, 0) { return 1; }
 HLE_STDCALL(D3D_BlockOnResource, 1) {
     uint32_t res = a[0];
     if (res && g_backend) {
-        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        D3dLock lock;
         uint32_t type = R32(res) & 0x70000;  // 0x40000 texture, 0x50000 surface
         if (type == 0x40000 || type == 0x50000) {
             uint32_t data = mem::VirtualFromPhysical(R32(res + 4));
@@ -539,20 +558,20 @@ HLE_STDCALL(D3D_BlockOnResource, 1) {
 HLE_WRAP(Lock2DSurface, 6) {
     uint32_t res = a[0];
     if ((a[5] & 0x20) && res && g_backend) {  // D3DLOCK_NOOVERWRITE
-        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        D3dLock lock;
         g_backend->SyncLate(mem::VirtualFromPhysical(R32(res + 4)));
     }
 }
 HLE_STDCALL(D3DResource_BlockUntilNotBusy, 1) {
     if (a[0] && g_backend) {
-        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        D3dLock lock;
         g_backend->WaitResource(a[0]);
     }
     gpu::MarkDirty(a[0]);
     return 0;
 }
 HLE_STDCALL(D3DResource_IsBusy, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t res = a[0];
     if (!res) return 0;
     // set on the device, a surface also through its texture
@@ -562,24 +581,24 @@ HLE_STDCALL(D3DResource_IsBusy, 1) {
 }
 HLE_STDCALL(D3D_BlockOnTime, 2) { return 0; }
 HLE_STDCALL(D3DDevice_BlockOnFence, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     if (g_backend) g_backend->WaitFence(a[0]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_InsertFence, 0) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     return g_backend ? g_backend->Fence() : 0;
 }
 HLE_STDCALL(D3DDevice_IsFencePending, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     return g_backend && g_backend->FencePending(a[0]) ? 1 : 0;
 }
 HLE_STDCALL(D3D_SetFence, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     return g_backend ? g_backend->Fence() : 0;
 }
 HLE_STDCALL(D3D_KickOffAndWaitForIdle, 0) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     if (g_backend) g_backend->Flush();
     return 0;
 }
@@ -587,12 +606,12 @@ HLE_FASTCALL(CDevice_KickOff, 0) { return 0; }
 
 HLE_STDCALL(D3DDevice_MakeSpace, 0) {
     LOG_FIRST(16, "d3d: MakeSpace from %08X, some caller still pushes hardware commands", R32(ctx.esp));
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     return ScratchPush();
 }
 HLE_STDCALL(D3D_MakeRequestedSpace, 2) {
     LOG_FIRST(16, "d3d: MakeRequestedSpace from %08X", R32(ctx.esp));
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     return ScratchPush();
 }
 
@@ -723,14 +742,14 @@ static void PaceMovie30() {
 }
 
 HLE_STDCALL(D3DDevice_EnableOverlay, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     g_overlay_enabled = (a[0] != 0);
     if (!g_overlay_enabled) g_overlay_surface = 0;
     LOGI("d3d: EnableOverlay %u", a[0]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_UpdateOverlay, 5) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     g_overlay_surface = a[0];
     g_overlay_enabled = (a[0] != 0);
     if (a[0] && g_backend && g_buffers[1]) {
@@ -767,7 +786,7 @@ HLE_STDCALL(D3DDevice_SetGammaRamp, 2) {
 // targets and presentation
 
 HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t rt = a[0] ? a[0] : Dev(kDevRenderTarget), zs = a[1];
     AddRef(ctx, rt);
     uint32_t old_rt = Dev(kDevRenderTarget), old_zs = Dev(kDevDepth);
@@ -814,7 +833,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     g_last_swap_time = host::NowNs();
     uint32_t n;
     {
-        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        D3dLock lock;
         g_presents++;
         if (g_presents <= 10 || (g_presents % 60) == 0) {
             LOGI("d3d: presenting frame %u, push=%08X walk=%08X", unsigned(g_presents.load()), Dev(kDevPush), g_walk);
@@ -853,7 +872,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
 }
 
 HLE_STDCALL(D3DDevice_Clear, 6) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     const uint8_t* rects = a[0] && a[1] ? static_cast<const uint8_t*>(HostPtr(a[1])) : nullptr;
     static uint32_t clear_count = 0;
     static uint32_t seen_flags[32];
@@ -872,13 +891,13 @@ HLE_STDCALL(D3DDevice_Clear, 6) {
 }
 
 HLE_STDCALL(D3DDevice_CopyRects, 5) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     if (g_backend) g_backend->Copy(SurfaceOf(a[0]), SurfaceOf(a[3]), a[2], a[1], a[4]);
     return 0;
 }
 
 HLE_STDCALL(D3DDevice_SetViewport, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t v = a[0];
     g_state.viewport = gpu::Viewport(R32(v), R32(v + 4), R32(v + 8), R32(v + 12), GF(v + 16), GF(v + 20));
     g_state.scissor_count = 0;
@@ -888,7 +907,7 @@ HLE_STDCALL(D3DDevice_SetViewport, 1) {
 }
 
 HLE_STDCALL(D3DDevice_SetScissors, 3) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     g_state.scissor_count = std::min<uint32_t>(a[0], 8);
     for (uint32_t i = 0; i < g_state.scissor_count * 4; i++) g_state.scissors[i] = R32(a[2] + i * 4);
     MARK(g_state.scissor_count);
@@ -1030,7 +1049,7 @@ HLE_STDCALL(D3DDevice_SetMaterial, 1) {
 HLE_WRAP(D3DDevice_SetLight, 2) {
     uint32_t i = a[0], l = a[1];
     if (i < 8 && l) {
-        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        D3dLock lock;
         for (uint32_t k = 0; k < 26; k++) g_state.lights[i][k] = R32(l + k * 4);
         MARK(g_state.lights[i]);
     }
@@ -1038,7 +1057,7 @@ HLE_WRAP(D3DDevice_SetLight, 2) {
 HLE_WRAP(D3DDevice_LightEnable, 2) {
     uint32_t i = a[0], on = a[1];
     if (i < 8) {
-        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        D3dLock lock;
         g_state.light_enable = on ? g_state.light_enable | 1u << i : g_state.light_enable & ~(1u << i);
         MARK(g_state.light_enable);
     }
@@ -1047,7 +1066,7 @@ HLE_WRAP(D3DDevice_LightEnable, 2) {
 // resources in use
 
 HLE_STDCALL(D3DDevice_SetTexture, 2) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t stage = a[0] & 3, tex = a[1];
     uint32_t old = Dev(kDevTextures + stage * 4);
     if (tex != old) AddRef(ctx, tex);
@@ -1061,7 +1080,7 @@ HLE_STDCALL(D3DDevice_SetTexture, 2) {
 // SetPalette(stage, palette): the colours a P8 texture of the stage looks up
 HLE_STDCALL(D3DDevice_SetPalette, 2) {
     XDK_REQUIRE("d3d", XDK_KEY(CDevice_Palettes));
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t stage = a[0] & 3, pal = a[1];
     uint32_t old = Dev(kDevPalettes + stage * 4);
     AddRef(ctx, pal);
@@ -1074,7 +1093,7 @@ HLE_STDCALL(D3DDevice_SetPalette, 2) {
 // SwitchTexture(method, data, format), fastcall: a swizzled texture of the bound one's shape replaces it. It is
 // bound through a header of the stage's own holding the bound texture's fields with the new data and format.
 HLE_FASTCALL(D3DDevice_SwitchTexture, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     static uint32_t headers[4];
     // texture methods from 0x1B00, 0x40 per stage
     uint32_t stage = (((a[0] & 0x1FFC) - 0x1B00) >> 6) & 3, cur = g_state.textures[stage];
@@ -1088,7 +1107,7 @@ HLE_FASTCALL(D3DDevice_SwitchTexture, 1) {
 }
 
 HLE_STDCALL(D3DDevice_SetStreamSource, 3) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t n = a[0] & 15, vb = a[1], stride = a[2];
     uint32_t old = R32(kStreams + n * kStreamSize + XDK_Stream_Buffer);
     // AddRef and Release run the title's own code: for the same buffer again they cancel out
@@ -1102,7 +1121,7 @@ HLE_STDCALL(D3DDevice_SetStreamSource, 3) {
 
 HLE_STDCALL(D3DDevice_SetIndices, 2) {
     XDK_REQUIRE("d3d", XDK_DATA(D3D_IndexData));
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t ib = a[0];
     uint32_t old = Dev(kDevIndexBuffer);
     AddRef(ctx, ib);
@@ -1122,7 +1141,7 @@ HLE_STDCALL(D3DDevice_SetIndices, 2) {
 // shaders
 
 HLE_STDCALL(D3DDevice_CreateVertexShader, 4) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t decl = a[0], func = a[1], out = a[2];
     auto vs = std::make_shared<gpu::VertexShader>();
     if (decl) {
@@ -1153,7 +1172,7 @@ HLE_STDCALL(D3DDevice_CreateVertexShader, 4) {
 }
 
 HLE_STDCALL(D3DDevice_DeleteVertexShader, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     auto it = g_vs.find(a[0]);
     if (it != g_vs.end()) {
         // MC3 X-12: freed only when the last reference goes (a state block that recorded it holds one); freed at
@@ -1171,7 +1190,7 @@ HLE_STDCALL(D3DDevice_DeleteVertexShader, 1) {
 
 // (handle, data, size in and out): the program as it was given, the size alone without data or room
 HLE_STDCALL(D3DDevice_GetVertexShaderFunction, 3) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     auto it = g_vs.find(a[0]);
     uint32_t words = it == g_vs.end() ? 0 : uint32_t(it->second->program.size());
     uint32_t need = words ? 4 + words * 4 : 0, room = R32(a[2]);
@@ -1190,7 +1209,7 @@ static uint32_t g_vs_hist_n = 0;
 
 static void ApplyVertexShader(uint32_t h);
 HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t h = a[0];
     g_vs_hist[g_vs_hist_n & 7][0] = h;
     g_vs_hist[g_vs_hist_n & 7][1] = R32(ctx.esp);
@@ -1280,7 +1299,7 @@ static void LoadVec4(std::array<float, 4>& dst, uint32_t src) {
 // skinning's index scale c9: ignored, it went to whatever register the last load left, and every character stood
 // stiff); after a set, raw values that follow without another load continue from where it ended.
 static void SetVertexConstants(uint32_t reg, uint32_t src, uint32_t dwords, bool shadow) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     Walk(Dev(kDevPush));
     if (reg >= 192) return;
     if (reg <= 105 && reg + (dwords + 3) / 4 > 105 && src)
@@ -1332,7 +1351,7 @@ HLE_FASTCALL(D3DDevice_SetVertexShaderConstantNotInlineFast, 1) {
 // original guarda em CDevice + 0xB98 + interno * 16 e envia pelo pushbuffer, que aqui ninguem le. Sem isto, nenhum
 // shader programavel recebia matrizes: personagens e veiculos sumiam.
 HLE_STDCALL(D3DDevice_SetVertexShaderConstant, 3) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     Walk(Dev(kDevPush));  // MC3: inline writes pushed before this one come first
     int32_t reg = int32_t(a[0]) + 0x60;
     uint32_t src = a[1], n = a[2];
@@ -1357,14 +1376,14 @@ HLE_STDCALL(D3DDevice_SelectVertexShader, 2) {
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     g_own_constants = a[0] & 0x10;  // D3DSCM_NORESERVEDCONSTANTS
     UpdateViewportConstants();
     return 0;
 }
 
 HLE_STDCALL(D3DDevice_CreatePixelShader, 2) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     std::shared_ptr<gpu::PixelShader> ps = std::make_shared<gpu::PixelShader>();
     for (uint32_t k = 0; k < sizeof(ps->def) / 4; k++) ps->def[k] = R32(a[0] + k * 4);
     uint32_t rec = mem::AllocSystem(16, 16);
@@ -1375,13 +1394,13 @@ HLE_STDCALL(D3DDevice_CreatePixelShader, 2) {
 }
 
 HLE_STDCALL(D3DDevice_DeletePixelShader, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     if (g_ps.erase(a[0])) mem::FreeSystem(a[0]);
     return 0;
 }
 
 HLE_STDCALL(D3DDevice_SetPixelShader, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     // MC3 X-12 (2026-11-12), as the PC port: the device keeps the current one like the XDK's: the state block capture
     // (0x4169D0) copies CDevice+0x784, and its apply (0x416DFF) sets it again; left 0, each replay set no shader
     // off by default (2026-11-12): with it the state blocks give the car its paint pixel shader back, which the
@@ -1435,7 +1454,7 @@ HLE_STDCALL(D3DDevice_SetPixelShader, 1) {
 }
 
 HLE_STDCALL(D3DDevice_SetPixelShaderConstant, 3) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     uint32_t reg = a[0], src = a[1], n = a[2];
     for (uint32_t i = 0; i < n && reg + i < 16; i++) LoadVec4(g_state.psc[reg + i], src + i * 16);
     MARK(g_state.psc);
@@ -1477,7 +1496,7 @@ struct FvfSnapshot {
 static void LogNoShader(const char* what, X86Context& ctx, const Args& a);
 static void SyncVertexShader();
 HLE_STDCALL(D3DDevice_DrawVertices, 3) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     SyncVertexShader();
     LogNoShader("DrawVertices", ctx, a);
     static uint32_t dv_count = 0;
@@ -1553,7 +1572,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     static uint32_t s_timed = 0;
     const bool tm = (s_timed++ & 15) == 0;
     uint64_t c0 = tm ? __mftb() : 0;
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     SyncVertexShader();
     LogNoShader("DrawIndexedVertices", ctx, a);
     uint64_t c1 = tm ? __mftb() : 0;
@@ -1914,7 +1933,7 @@ void Walk(uint32_t end) {
 }  // namespace d3d
 
 HLE_STDCALL(D3DDevice_DrawVerticesUP, 4) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     Walk(Dev(kDevPush));
     DrawUp(a[0], a[1], HostPtr(a[2]), a[3], false);
     return 0;
@@ -1922,7 +1941,7 @@ HLE_STDCALL(D3DDevice_DrawVerticesUP, 4) {
 
 // JSRF: DrawIndexedVerticesUP(prim, count, indices, vertices, stride), 0x1991C0
 HLE_STDCALL(D3DDevice_DrawIndexedVerticesUP, 5) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     Walk(Dev(kDevPush));
     uint32_t count = a[1], stride = a[4];
     if (!g_backend || !count || !stride || !a[2] || !a[3]) return 0;
@@ -1945,13 +1964,13 @@ HLE_STDCALL(D3DDevice_DrawIndexedVerticesUP, 5) {
 // BeginPush(dwords) hands out room for raw hardware commands, EndPush(end) runs what the title wrote there:
 // a primitive between two begin/end writes with its vertices inline, any other method as a simple state.
 HLE_STDCALL(D3DDevice_BeginPush, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     g_push_begin = ScratchPush(a[0] * 4);
     return g_push_begin;
 }
 
 HLE_STDCALL(D3DDevice_EndPush, 1) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     const uint32_t kBeginEnd = 0x17FC, kInlineArray = 0x1818;
     static std::vector<uint32_t> vertices;
     LOG_FIRST(6, "d3d: EndPush %08X..%08X from %08X, first command %08X", g_push_begin, a[0], R32(ctx.esp),
@@ -2022,7 +2041,7 @@ HLE_STDCALL(D3DDevice_SetTile, 2) { return 0; }
 // the library's Begin pushes the start of the primitive, here it is opened
 HLE_STDCALL(D3DDevice_Begin, 1) {
     XDK_REQUIRE("d3d", XDK_KEY(CDevice_Flags));
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     Walk(Dev(kDevPush));
     g_im_prim = a[0];
     g_im_mask = 0;
@@ -2033,7 +2052,7 @@ HLE_STDCALL(D3DDevice_Begin, 1) {
 // the library's End pushes the end of the primitive, here it is drawn
 HLE_STDCALL(D3DDevice_End, 0) {
     XDK_REQUIRE("d3d", XDK_KEY(CDevice_Flags));
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    D3dLock lock;
     Walk(Dev(kDevPush));
     EndPrimitive();
     SetDev(XDK_CDevice_Flags, Dev(XDK_CDevice_Flags) & ~0x1800u);

@@ -208,6 +208,13 @@ void __cdecl main() {
     }
     crash::Install();
     LOGR("Midnight Club 3 Remix for Xbox 360 (runtime from JSRF/BRE), built " __DATE__ " " __TIME__);
+    {   // MC3 (2026-11-17): the line above dates only this file; the XEX's own date tells one release from another
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        SYSTEMTIME st;
+        if (GetFileAttributesExA("game:\\default.xex", GetFileExInfoStandard, &fa) && FileTimeToSystemTime(&fa.ftLastWriteTime, &st))
+            LOGR("default.xex: %u bytes, saved %04u-%02u-%02u %02u:%02u:%02u (UTC)", unsigned(fa.nFileSizeLow), st.wYear, st.wMonth,
+                 st.wDay, st.wHour, st.wMinute, st.wSecond);
+    }
     MEMORYSTATUS ms;
     GlobalMemoryStatus(&ms);
     LOGI("memory: %u MB free of %u MB", unsigned(ms.dwAvailPhys >> 20), unsigned(ms.dwTotalPhys >> 20));
@@ -227,7 +234,12 @@ void __cdecl main() {
     bool cap_held = false, fs_held = false, gm_held = false;
     for (;;) {
         Sleep(1);
-        sampler.Sample(host::NowNs());
+        // MC3 (2026-11-16): the sampler every 10 ms, not every pass (~500 a second), on core 0 with the audio mixer
+        static int64_t next_sample = 0;
+        if (host::NowNs() >= next_sample) {
+            next_sample = host::NowNs() + 10000000ll;
+            sampler.Sample(host::NowNs());
+        }
         crash::Pulse();
         if (host::NowNs() < next_pad) continue;
         next_pad = host::NowNs() + 50000000ll;

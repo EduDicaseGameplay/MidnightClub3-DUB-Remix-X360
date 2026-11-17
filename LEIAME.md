@@ -10,23 +10,25 @@ Não é emulador nem retrocompatibilidade. O código x86 do jogo é traduzido pa
 
 - Abre os menus, a carreira, o modo livre e as corridas. Música, som dos motores, HUD, minimapa, desfoque de velocidade e a luz dos faróis no chão funcionam.
 - A imagem original de 720x480 é desenhada com qualidade total e mostrada em 1280x720, widescreen.
-- O tempo da corrida segue o tempo real: quando um quadro demora mais, o jogo avança seus próprios passos para acompanhar, e os carros e o cronômetro não ficam em câmera lenta.
+- A corrida segue o tempo real: quando um quadro demora mais, o jogo avança o tempo que passou, e o cronômetro, o trânsito e os adversários não ficam em câmera lenta.
+- A física dos carros roda em passos curtos, de no máximo 1/30 de segundo, como no Xbox original, mesmo quando o quadro é mais longo. Assim os carros não tremem parados e a direção responde como deve.
+- O som 5.1 do jogo é reduzido para estéreo sem estourar: a música não pende para um lado e um limitador segura os picos quando muitos sons tocam juntos.
 - O desempenho no console está na tabela abaixo.
 - Os vídeos de abertura (Rockstar, Rockstar San Diego e a abertura do jogo) tocam, assim como os vídeos tutoriais.
 - Ainda não testei no console a carreira inteira, salvar e carregar, nem os replays.
 
 ## Desempenho
 
-Medido no meu console RGH, em 720p, com o `trafego.txt` e o `lod.txt` padrão. O fps depende principalmente de quanto da cidade aparece na tela, então muda bastante ao longo da mesma pista.
+Medido no meu console RGH, em 720p, com o `trafego.txt` e o `lod.txt` padrão. O fps depende principalmente de quanto da cidade aparece na tela, então muda bastante ao longo da mesma pista. Mesmo com fps baixo, a corrida anda no tempo real.
 
 | Onde | FPS |
 |---|---|
-| Menus e telas de abertura | cerca de 22 |
-| Ruas leves (áreas abertas, pouca coisa em volta) | 19 a 26 |
-| Ruas médias | 16 a 18 |
-| Ruas pesadas (centro, muitos prédios e trânsito) | 14 a 15 |
+| Menus e telas de abertura | 20 a 30 |
+| Ruas leves (áreas abertas, pouca coisa em volta) | 12 a 14 |
+| Ruas médias | 9 a 11 |
+| Ruas pesadas (centro, muitos prédios e trânsito) | 7 a 9 |
 
-O jogo foi feito para 30 fps no Xbox original. Aqui o limite é o processador: o código x86 traduzido roda mais devagar no PowerPC do 360 do que o original rodava no processador dele. Mesmo assim, o tempo da corrida segue o tempo real, então um fps menor não deixa a corrida em câmera lenta.
+O jogo foi feito para 30 fps no Xbox original. Aqui o limite é o processador: o código x86 traduzido roda mais devagar no PowerPC do 360 do que o original rodava no processador dele. A física em passos curtos custa alguns milissegundos por quadro, mas é o que mantém os carros estáveis e o controle certo com o tempo real.
 
 ## Do que você precisa
 
@@ -97,6 +99,9 @@ Arquivos na pasta do jogo, ao lado do `default.xex`:
 |---|---|
 | `trafego.txt` | Dois números de 0.2 a 1.0: densidade de trânsito e de pedestres. `1.0 1.0` é o jogo original, `0.7 0.7` é o padrão, números menores deixam as ruas mais vazias |
 | `lod.txt` | Um número de 0.4 a 1.0: a que distância os modelos trocam para a versão detalhada e os objetos da cidade são desenhados. `1.0` é o original, `0.75` é o padrão |
+| `desfoque.txt` | Um número de 0 a 1: a força do desfoque de velocidade. `1` é o jogo original, `0.6` é o padrão, `0` desliga |
+| `passo.txt` | Um número de 0.034 a 0.134: quanto tempo, em segundos, um quadro pode avançar a corrida. `0.1` é o padrão. Menor deixa o carro mais fácil de controlar com fps baixo, mas a corrida fica um pouco mais lenta que o tempo real |
+| `subpasso.txt` | Um número de 0.034 a 0.067: o maior passo da física, em segundos. `0.0333` (1/30) é o padrão. Maior dá um pouco mais de fps, mas com `0.067` os carros voltam a tremer parados |
 | `aspect43.txt` | Arquivo vazio: avisa o jogo que a TV é 4:3 |
 | `sem_widescreen.txt` | Arquivo vazio: 720p em 4:3 |
 | `sem_720p.txt` | Arquivo vazio: saída em 640x480 |

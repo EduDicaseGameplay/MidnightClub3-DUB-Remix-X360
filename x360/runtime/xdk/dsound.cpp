@@ -301,6 +301,12 @@ void Levels(Voice& v, float g[2][2]) {
     for (uint32_t s = 0; s < n; s++) speakers |= bin[s] < 10 && bin[s] != 3;
     for (uint32_t c = 0; c < 2; c++) {
         g[c][0] = g[c][1] = 0;
+        // MC3 (2026-11-16): the fold's weights squared that reach each side. A stereo buffer of the race on bins 0 to 5
+        // had its left channel on front, centre and back (1 + 0.707 + 0.707 added: 1.33 on the left) and its right on
+        // front and back (0.94), the sub left out: louder on the left and past 1.0 alone (Xenia log of 2026-11-16, bins
+        // diagnostic), the mix clipped. The fold keeps the power instead: a side that several bins reach is divided by
+        // the root of their weights squared (1.41 for front + centre + back, 1.22 for front + back); one bin is as before.
+        float w2[2] = {0, 0};
         for (uint32_t s = c; c < v.channels && s < per && s < n; s += step) {
             uint32_t b = bin[s];
             if (speakers && (b == 3 || b > 9)) continue;  // sub and effect sends
@@ -312,13 +318,22 @@ void Levels(Voice& v, float g[2][2]) {
             bool right = !speakers || b == 2 || (b & 1);
             // slots that reach one speaker add, as on the DSP; effect sends alone play the loudest
             if (speakers) {
-                if (left) g[c][0] += x;
-                if (right) g[c][1] += x;
+                const float w = folded ? 0.5f : 1.0f;
+                if (left) {
+                    g[c][0] += x;
+                    w2[0] += w;
+                }
+                if (right) {
+                    g[c][1] += x;
+                    w2[1] += w;
+                }
             } else {
                 g[c][0] = std::max(g[c][0], x);
                 g[c][1] = std::max(g[c][1], x);
             }
         }
+        for (int side = 0; side < 2; side++)
+            if (w2[side] > 1.0f) g[c][side] /= sqrtf(w2[side]);
     }
     if (v.voice3d.enabled) return;
     if (!v.is3d || v.mode == 2) return;
@@ -525,6 +540,72 @@ std::map<uint32_t, Voice>::iterator MixYield(std::map<uint32_t, Voice>::iterator
     return g_voices.upper_bound(key);
 }
 
+// MC3 (2026-11-16): the mix's level. The output was clipped at 1.0 sample by sample (console log of 2026-11-16: peak
+// 1.000 in every 5 s of the race, and still with 6 voices after the finish, where the sound turned harsh). A limiter
+// takes the block's gain down at once when the mix would pass kCeil and brings it back over ~150 ms; what still passes
+// (the block starts at the last gain) bends into the ceiling instead of being cut flat. Under kCeil nothing changes.
+int g_gap_n = 0;
+int64_t g_gap_ms = 0;
+struct VoicePeak {
+    float peak;
+    uint32_t obj;
+};
+VoicePeak g_loud[3];
+float g_mix_peak = 0, g_lim_gain = 1.0f, g_lim_min = 1.0f;
+uint32_t g_clip_frames = 0;
+void NoteLoud(const Voice& v, float peak) {
+    if (peak <= g_loud[2].peak) return;
+    for (int j = 0; j < 3; j++)  // one entry per voice, its loudest
+        if (g_loud[j].obj == v.obj) {
+            if (peak <= g_loud[j].peak) return;
+            for (int m = j; m < 2; m++) g_loud[m] = g_loud[m + 1];
+            g_loud[2].peak = 0;
+            g_loud[2].obj = 0;
+            break;
+        }
+    int k = 2;
+    while (k > 0 && peak > g_loud[k - 1].peak) {
+        g_loud[k] = g_loud[k - 1];
+        k--;
+    }
+    g_loud[k].peak = peak;
+    g_loud[k].obj = v.obj;
+}
+__forceinline float SoftCeil(float x) {
+    const float knee = 0.85f, room = 1.0f - knee;
+    const float m = x < 0 ? -x : x;
+    if (m <= knee) return x;
+    const float over = (m - knee) / room;
+    const float y = knee + room * over / (1.0f + over);  // reaches 1.0 only at infinity
+    return x < 0 ? -y : y;
+}
+void Limit(float* out, uint32_t frames) {
+    const float kCeil = 0.95f;
+    float peak = 0;
+    for (uint32_t i = 0; i < frames * 2; i++) {
+        const float m = out[i] < 0 ? -out[i] : out[i];
+        if (m > peak) peak = m;
+        if (m > 1.0f) g_clip_frames++;
+    }
+    if (peak > g_mix_peak) g_mix_peak = peak;
+    // the gain this block's peak allows: down at once, back up toward it over ~150 ms (never above it or 1)
+    const float target = peak > kCeil ? kCeil / peak : 1.0f;
+    const float from = g_lim_gain;
+    const float back = float(frames) / (audio::kRate * 0.15f);
+    float to = target < from ? target : from + (target - from) * (back < 1.0f ? back : 1.0f);
+    g_lim_gain = to;
+    if (to < g_lim_min) g_lim_min = to;
+    if (from >= 0.9999f && to >= 0.9999f && peak <= 0.85f) return;  // the usual case: nothing to do
+    // down within the first 1.3 ms (no click, and the block's peak is already under), up across the whole block
+    const uint32_t ramp = to < from ? (frames < 64 ? frames : 64) : frames;
+    const float d = (to - from) / float(ramp);
+    for (uint32_t i = 0; i < frames; i++) {
+        const float gn = i < ramp ? from + d * float(i + 1) : to;
+        out[i * 2] = SoftCeil(out[i * 2] * gn);
+        out[i * 2 + 1] = SoftCeil(out[i * 2 + 1] * gn);
+    }
+}
+
 void Render(float* out, uint32_t frames) {
     std::memset(out, 0, frames * 2 * sizeof(float));
     DsLock lock;
@@ -565,6 +646,7 @@ void Render(float* out, uint32_t frames) {
         double step = 48000.0 / audio::kRate * v.voice3d.PitchRatio(pitch + (idle ? 0.0 : v.mod.pitch));
         float gain = idle ? 1.0f : v.mod.gain;
         bool off = false;  // the amplitude envelope ended the voice
+        float vpk = 0;     // this voice's loudest output sample in the block
         uint32_t i = 0;
         for (; i < frames; i++) {
             if (!idle) {
@@ -635,8 +717,12 @@ void Render(float* out, uint32_t frames) {
             float t = float(v.pos - f);
             a = (a + (a1 - a) * t) * gain;
             b = (b + (b1 - b) * t) * gain;
-            out[i * 2] += a * g[0][0] + b * g[1][0];
-            out[i * 2 + 1] += a * g[0][1] + b * g[1][1];
+            const float l = a * g[0][0] + b * g[1][0], r = a * g[0][1] + b * g[1][1];
+            out[i * 2] += l;
+            out[i * 2 + 1] += r;
+            const float ml = l < 0 ? -l : l, mr = r < 0 ? -r : r;
+            vpk = ml > vpk ? ml : vpk;
+            vpk = mr > vpk ? mr : vpk;
             v.pos += step;
         }
         // a starved stream's voice still runs, and so do its envelopes, for the rest of the block
@@ -645,6 +731,7 @@ void Render(float* out, uint32_t frames) {
             if (v.mod.sample == 0) off = !v.mod.Step();
             v.mod.sample = (v.mod.sample + 1) % audio::kFrameSamples;
         }
+        NoteLoud(v, vpk);
         if (off) ReleaseEnded(v);
     }
     diag_max_playing = std::max(diag_max_playing, playing);
@@ -652,9 +739,33 @@ void Render(float* out, uint32_t frames) {
     if ((diag_frames += frames) >= audio::kRate * 5) {
         LOGI("dsound: %u voices, up to %u playing in the last 5 s; mixer com g_lock %.0f ms, threads do jogo esperando g_lock %.0f ms",
              unsigned(g_voices.size()), diag_max_playing, double(g_mix_hold_ns.exchange(0)) / 1e6, double(g_ds_wait_ns.exchange(0)) / 1e6);
+        LOGI("dsound: mix peak %.2f, %u samples over 1.0, limiter down to %.2f; streams refilled late %d times (%lld ms silent)",
+             double(g_mix_peak), g_clip_frames, double(g_lim_min), g_gap_n, (long long)g_gap_ms);
+        for (int k = 0; k < 3 && g_loud[k].peak > 0; k++) {
+            const Voice* lv = Find(g_loud[k].obj);
+            if (!lv) continue;
+            LOGI("dsound:   loud %d: obj=%08X peak %.2f %s tag %X %u ch %u Hz vol %.2f headroom %.2f bins %u 3d %d", k,
+                 g_loud[k].obj, double(g_loud[k].peak), lv->stream ? "stream" : "buffer", lv->tag, lv->channels, lv->rate,
+                 double(lv->volume), double(lv->headroom), unsigned(lv->nbins), int(lv->is3d || lv->voice3d.enabled));
+            char bins[160];
+            int o = 0;
+            for (int q = 0; q < lv->nbins && o < 140; q++) o += sprintf(bins + o, " %u:%d", lv->bin[q], lv->bin_mb[lv->bin[q]]);
+            bins[o] = 0;
+            float lg[2][2];
+            Levels(*const_cast<Voice*>(lv), lg);
+            LOGI("dsound:     bins (bin:mB)%s; gains L->(%.2f %.2f) R->(%.2f %.2f)", bins, double(lg[0][0]), double(lg[0][1]),
+                 double(lg[1][0]), double(lg[1][1]));
+        }
+        memset(g_loud, 0, sizeof(g_loud));
+        g_mix_peak = 0;
+        g_lim_min = 1.0f;
+        g_clip_frames = 0;
+        g_gap_n = 0;
+        g_gap_ms = 0;
         diag_frames = 0;
         diag_max_playing = 0;
     }
+    Limit(out, frames);
     for (uint32_t i = 0; i < frames * 2; i++) out[i] = out[i] < -1.0f ? -1.0f : out[i] > 1.0f ? 1.0f : out[i];
 }
 
@@ -1435,6 +1546,10 @@ STREAM(Process, 3) {
     if (v.starved_at >= 0) {
         const int64_t silent = NowMs() - v.starved_at;
         static unsigned gaps = 0;
+        if (pk.size) {  // MC3 (2026-11-16): every gap of real data, for the mixer's 5 s line (empty packets are silence on purpose)
+            g_gap_n++;
+            g_gap_ms += silent;
+        }
         if (silent >= 20 && gaps++ < 64)
             LOGW("dsound: stream %08X (%u ch) silent %lld ms until its refill", v.obj, unsigned(v.channels), (long long)silent);
     }

@@ -503,6 +503,41 @@ private:
         reports_.push_back(r);
         DeliverReports();
     }
+    // MC3 (2026-11-15), the PC port's ScaleScreenEffect for the speed blur (d3d12.cpp): the race lays a half size copy
+    // of the frame over it, blended by alpha with the depth test on, its strength in the vertex alpha (0.878 at speed).
+    // That alpha is scaled by game:\desfoque.txt (0 to 1; without it kBlurDefault; 1 is the console's)
+    void SpeedBlurStrength(const State& s, Assembled& a, const TextureDesc& d0, bool bound0, const float* verts) {
+        static float scale = -1;
+        if (scale < 0) {
+            scale = 0.6f;  // kBlurDefault
+            if (FILE* f = fopen("game:\\desfoque.txt", "rb")) {
+                char b[32] = {0};
+                fread(b, 1, sizeof(b) - 1, f);
+                fclose(f);
+                char* e = NULL;
+                double v = strtod(b, &e);
+                if (e != b) scale = float(v);
+            }
+            if (!(scale >= 0.0f)) scale = 0.6f;
+            if (scale > 1.0f) scale = 1.0f;
+            LOGI("gpu: speed blur strength x%.2f (game:\\desfoque.txt; 1.00 is the console)", scale);
+        }
+        if (scale >= 1.0f || !rt_ || rt_->lw < 640 || !bound0 || !a.pretransformed || a.vertex_count != 4 || a.nregs == 0) return;
+        if (!SimpleState(s, kMBlendEnable)) return;
+        const uint32_t src = SimpleState(s, kMSrcBlend), dst = SimpleState(s, kMDestBlend);
+        if (!((src == 0x302 || src == 5) && (dst == 0x303 || dst == 6))) return;
+        if (!(SimpleState(s, kMDepthTestEnable) != 0 || s.rs[kRsZEnable] != 0)) return;
+        if (!d0.width || d0.width * 2 > rt_->lw || d0.height * 2 > rt_->lh) return;  // a half size buffer
+        if (!(a.regs & (1u << 3)) || a.vertices.empty() || verts != &a.vertices[0]) return;  // the diffuse colour, v3
+        uint32_t k = 0;
+        for (int r = 0; r < 3; r++) k += (a.regs >> r) & 1;
+        for (uint32_t v = 0; v < 4; v++) a.vertices[(size_t(v) * a.nregs + k) * 4 + 3] *= scale;
+        static int told = 0;
+        if (told < 4) {
+            told++;
+            LOGI("gpu: speed blur draw %u (%ux%u over %ux%u): its alpha scaled by %.2f", draws_, d0.width, d0.height, rt_->lw, rt_->lh, scale);
+        }
+    }
     void SaveDepth(Target* t);
     void DrawDepth(Target* src);
     bool DepthCopy(const State& s);
@@ -2615,6 +2650,7 @@ void XenosBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         return;
     }
     SetStates(s, a);
+    SpeedBlurStrength(s, a, desc[0], bound[0], verts);
     int64_t t4b = Ticks();
     g_prof[kPfState] += t4b - t4;
     // bring-up: the states of the title's first draws, and where its first vertices land
@@ -2989,8 +3025,11 @@ void XenosBackend::Present(const Surface& front) {
         cap_seen_.clear();
         LOGI("gpu: capture %u starts, %s", cap_n_, cap_ ? "the next frame is saved" : "the file could not be made");
     }
-    // 4:3 in the middle of the output; JSRF: uma cena alargada ocupa a tela toda
-    uint32_t dw = g_wide_on && g_wide_scene ? out_w_ : out_h_ * 4 / 3, dx = (out_w_ - std::min(dw, out_w_)) / 2;
+    // MC3 (2026-11-15): told the TV is widescreen (XGetVideoFlags, app::Widescreen), the game draws its 720x480 frame
+    // anamorphic, 16:9 (its pixel aspect at 0x4B4E88 follows the display, Hor+: the PC port's fov.cpp), as it did for a
+    // 16:9 TV on the original Xbox: the frame fills the whole output. JSRF's g_wide_scene (its own widescreen hack) was
+    // never set here, and the frame was shown 4:3 with borders. 4:3 TVs (or game:\aspect43.txt) keep the 4:3 frame.
+    uint32_t dw = g_wide_on ? out_w_ : out_h_ * 4 / 3, dx = (out_w_ - std::min(dw, out_w_)) / 2;
     RECT r = {LONG(dx), 0, LONG(dx + std::min(dw, out_w_)), LONG(out_h_)};
     D3DTexture* shown = t->has_content ? t->tex : NULL;
     // a native movie's picture (game/movie.cpp), copied once per picture; lines of 4x4 blocks, 1280 bytes each
