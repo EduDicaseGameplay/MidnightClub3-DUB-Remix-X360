@@ -1,5 +1,5 @@
 // The DirectSound mixer's output through the Xbox 360's XAudio2: 48 kHz stereo, 16 bit samples in the CPU's own
-// byte order, 20 ms buffers with six queued, on a hardware thread of its own (the PC's xaudio2.cpp, ported).
+// byte order, 20 ms buffers with three queued, on a hardware thread of its own (the PC's xaudio2.cpp, ported).
 #include "audio/audio.h"
 
 #include <algorithm>
@@ -81,10 +81,15 @@ void Run(std::function<void(float*, uint32_t)> render) {
     for (uint32_t n = 0;;) {
         XAUDIO2_VOICE_STATE st;
         voice->GetState(&st);
-        if (st.BuffersQueued >= 6) {
+        // MC3 (2026-11-17): three blocks of 20 ms ahead, not six: the output added 120 ms after the game's frame, and
+        // the horns of the traffic were heard late on the console. A block is mixed in ~7 ms there (the mixer's own
+        // line in the log); a queue that runs dry is counted below
+        if (st.BuffersQueued >= 3) {
             WaitForSingleObject(callback.buffer_event, 25);
             continue;
         }
+        static uint32_t dry = 0, dry_told = 0;
+        if (n > 50 && st.BuffersQueued == 0) dry++;
         render(&mix[0], kFrames);
         // bring-up: a 440 Hz beep for the first half second proves the output path, apart from the game's mixer
         static uint32_t tone_frames = 0;
@@ -98,7 +103,8 @@ void Run(std::function<void(float*, uint32_t)> render) {
         static uint32_t since = 0;
         for (uint32_t i = 0; i < kFrames * 2; i++) peak = std::max(peak, fabsf(mix[i]));
         if ((since += kFrames) >= kRate * 5) {
-            LOGI("audio: peak %.3f over the last 5 s", peak);
+            LOGI("audio: peak %.3f over the last 5 s; output ran dry %u times", peak, dry - dry_told);
+            dry_told = dry;
             peak = 0;
             since = 0;
         }

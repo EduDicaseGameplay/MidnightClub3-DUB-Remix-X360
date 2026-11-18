@@ -13,6 +13,8 @@ It's not an emulator and it's not backward compatibility. The game's x86 code is
 - The race follows real time: when a frame takes longer, the game advances the time that passed, so the race clock, traffic and opponents don't go into slow motion.
 - Car physics runs in short steps of at most 1/30 of a second, like on the original Xbox, even when a frame takes longer. Cars don't shake when stopped and the steering responds the way it should.
 - The game's 5.1 sound is folded to stereo without clipping: the music doesn't lean to one side, and a limiter holds the peaks when many sounds play at once.
+- Engines rev with the car: the game sets each car's revs on the submix its engine sounds play through, and that submix now places the sound, so traffic, horns and impacts also come from where they are and fade with distance.
+- The music keeps up even at a low frame rate, the menu's song no longer plays over the race's, and sounds come out with less delay.
 - Performance on a real console is in the table below.
 - The intro videos at boot (Rockstar, Rockstar San Diego and the game's opening) play, and so do the tutorial videos.
 - I haven't tested the whole career, saving and loading, or replays on the console yet.
@@ -111,6 +113,6 @@ Files in the game folder, next to `default.xex`:
 
 ## Credits
 
-The runtime comes from my [Jet Set Radio Future](https://github.com/EduDicaseGameplay/JetSetRadioFuture-X360) and [Bloody Roar Extreme](https://github.com/EduDicaseGameplay/BloodyRoarExtreme-X360) ports for the Xbox 360, which use the [XboxXBE-Recomp](https://github.com/TGP482/XboxXBE-Recomp) tool and [BloodyRoarExtremeRecomp](https://github.com/bromurok/BloodyRoarExtremeRecomp). Many fixes follow the Windows port [MidnightClub3-Port](https://github.com/christiand0797/MidnightClub3-Port): the fixed step clock, replays, career events, the depth copy for the headlights, level of detail and traffic density. The WMA music fix follows mc3port. Details and licenses are in `THIRD_PARTY.txt` and `pc-recomp`.
+The runtime comes from my [Jet Set Radio Future](https://github.com/EduDicaseGameplay/JetSetRadioFuture-X360) and [Bloody Roar Extreme](https://github.com/EduDicaseGameplay/BloodyRoarExtreme-X360) ports for the Xbox 360, which use the [XboxXBE-Recomp](https://github.com/TGP482/XboxXBE-Recomp) tool and [BloodyRoarExtremeRecomp](https://github.com/bromurok/BloodyRoarExtremeRecomp). Many fixes follow the Windows port [MidnightClub3-Port](https://github.com/christiand0797/MidnightClub3-Port): the fixed step clock, replays, career events, the depth copy for the headlights, level of detail and traffic density. The WMA music fix, the submix routing of the engine and world sounds, and the way a stopped music stream hands its data back follow mc3port. Details and licenses are in `THIRD_PARTY.txt` and `pc-recomp`.
 
 Midnight Club 3: DUB Edition Remix belongs to Rockstar Games and Take-Two Interactive. This is a fan project with no connection to them.

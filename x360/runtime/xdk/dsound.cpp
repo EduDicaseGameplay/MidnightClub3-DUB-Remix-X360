@@ -124,6 +124,10 @@ struct Voice {
     std::deque<Packet> packets;
     // levels
     float volume, headroom;
+    uint32_t flags;  // MC3 diagnostic: DSBUFFERDESC / DSSTREAMDESC flags
+    bool adopting;   // MC3: taking its mix bins from the SetMixBinVolumes call being drained (made without bins)
+    uint32_t output; // MC3: the mix-in buffer it plays through (SetOutputBuffer), 0 for its own mix bins
+    bool stopped_by_flush;  // MC3: stopped by an asynchronous FlushEx: packets go back unplayed until a Pause
     uint8_t nbins, bin[8];
     int32_t bin_mb[32];  // by mix bin
     std::vector<float> curve;  // rolloff
@@ -142,7 +146,7 @@ struct Voice {
           loop_start(0), loop_len(0), play_start(0), play_len(0), owned(0), playing(false), looping(false),
           paused(false), sync(false), active(false), ending(false), hold(false), stopping(false), starved_at(-1), pos(0),
           freq(0), pitch(0), pitch_override(false), max_packets(1), callback(0),
-          context(0), volume(1), headroom(1), nbins(0), is3d(false), mode(0), min_dist(1), max_dist(1e9f), adpcm_lru(0) {
+          context(0), volume(1), headroom(1), flags(0), adopting(false), output(0), stopped_by_flush(false), nbins(0), is3d(false), mode(0), min_dist(1), max_dist(1e9f), adpcm_lru(0) {
         memset(bin, 0, sizeof(bin));
         memset(bin_mb, 0, sizeof(bin_mb));
         memset(p, 0, sizeof(p));
@@ -292,7 +296,70 @@ void Complete(Voice& v, Packet& pk, uint32_t status) {
 
 // gain of voice channel c on host left and right. A hardware voice holds two channels and owns a run of slots,
 // which alternate left and right.
+// MC3 (2026-11-17): a voice played through a mix-in buffer (SetOutputBuffer). As the console: its own mix bins do not
+// count, the mix-in's volume, headroom and bins place it, a mix-in's own output chains on. XACT routes every sound with
+// a position this way (engines, traffic, horns, wind, impacts), so that distance and pan apply to all the voices of a
+// sound at once, and puts a car's revs on the mix-in's pitch. Ignored until now: those sounds played at their own full
+// level, the engines never revved (Xenia, 2026-11-17: engine voices at their recording's pitch at full throttle) and
+// the mix went past 1.0. The reading, the 10 dB the console's effect stage leaves those sounds above their bins, and the
+// stereo-into-mono half are from the mc3port reference (MIT, src/pc/audio_gains.h), written again here.
+const float kMixInGain = 3.16f;
+Voice* Find(uint32_t obj);
+double Log2(double x);
+int32_t RoundI(double x);
+void FoldBin(uint32_t b, float x, float out[2]) {
+    if (b == 3 || b > 9) return;  // sub, reverb and effect sends
+    const bool folded = b == 2 || b == 4 || b == 5 || b == 8 || b == 9;
+    const float y = folded ? x * 0.707f : x;
+    if (b == 2 || !(b & 1)) out[0] += y;
+    if (b == 2 || (b & 1)) out[1] += y;
+}
+void MixInGains(const Voice& m, float out[2], int depth) {
+    out[0] = out[1] = 0;
+    const float vol = m.volume * m.headroom;
+    if (m.output && depth < 4) {
+        if (const Voice* next = Find(m.output)) {
+            MixInGains(*next, out, depth + 1);
+            out[0] *= vol;
+            out[1] *= vol;
+            return;
+        }
+    }
+    if (!m.nbins) {
+        out[0] = out[1] = vol;
+        return;
+    }
+    for (uint32_t i = 0; i < m.nbins; i++) FoldBin(m.bin[i], Db(m.bin_mb[m.bin[i]]) * vol, out);
+}
+// the pitch the mix-in chain adds (4096 an octave): XACT's engine revs
+int32_t MixInPitch(const Voice& v) {
+    int32_t add = 0;
+    const Voice* m = v.output ? Find(v.output) : NULL;
+    for (int depth = 0; m && depth < 4; depth++) {
+        if (m->pitch_override) add += m->pitch;
+        else if (m->freq) add += RoundI(4096.0 * Log2(double(m->freq) / 48000.0));
+        m = m->output ? Find(m->output) : NULL;
+    }
+    return add;
+}
+
+void ForgetOutput(uint32_t obj) {  // a mix-in let go: who played through it has its own bins again
+    for (std::map<uint32_t, Voice>::iterator it = g_voices.begin(); it != g_voices.end(); ++it)
+        if (it->second.output == obj) it->second.output = 0;
+}
 void Levels(Voice& v, float g[2][2]) {
+    if (v.output) {
+        if (const Voice* m = Find(v.output)) {
+            float out[2];
+            MixInGains(*m, out, 0);
+            const float gain = kMixInGain * v.volume * v.headroom * (v.channels == 2 ? 0.5f : 1.0f);
+            for (int c = 0; c < 2; c++) {
+                g[c][0] = c < int(v.channels) ? gain * out[0] : 0;
+                g[c][1] = c < int(v.channels) ? gain * out[1] : 0;
+            }
+            return;
+        }
+    }
     static const uint8_t kFront[2] = {0, 1};
     const uint8_t* bin = v.nbins ? v.bin : kFront;
     uint32_t n = v.nbins ? v.nbins : 2, voices = (std::max<uint32_t>(v.channels, 1) - 1) / 2 + 1;
@@ -393,7 +460,7 @@ void WatchOverlap() {
     uint32_t ids[2] = {0, 0}, n = 0;
     for (std::map<uint32_t, Voice>::iterator it = g_voices.begin(); it != g_voices.end(); ++it) {
         const Voice& v = it->second;
-        if (v.stream && v.channels == 2 && v.active && !v.hold && !v.paused && !v.sync && !v.packets.empty() &&
+        if (v.stream && v.channels == 2 && v.tag == 1 && v.active && !v.hold && !v.paused && !v.sync && !v.packets.empty() &&  // songs are PCM; the race's ambience is a stereo ADPCM stream
             !v.stopping && v.volume > 0.01f && n < 2)
             ids[n++] = v.obj;
     }
@@ -474,9 +541,21 @@ void DrainPendLocked() {
                 for (int k = 0; k < 3; k++) v->p[k] = F32(p.v[k]);
                 break;
             case kPendPitch: v->pitch = int32_t(p.v[0]); v->pitch_override = true; break;
-            case kPendBins:
-                for (uint32_t k = 0; k < p.v[0]; k++) v->bin_mb[p.v[1 + k * 2] & 31] = int32_t(p.v[2 + k * 2]);
+            case kPendBins: {
+                // MC3 (2026-11-17): a voice made without mix bins takes them from its first SetMixBinVolumes, as the
+                // XDK routes it: XACT positions its voices that way. Played on the default front pair at full level,
+                // the wind, tyre and scrape loops (one channel, no bins, volume 0.5 to 0.8) covered the engines (0.19,
+                // 7 bins) by ~13 dB (Xenia mixer dump of 2026-11-17, car at full throttle) and drove the mix past 1.0.
+                // The same reading is in the mc3port reference (src/pc/dsound_hle.cpp, apply_mix_bins).
+                const uint32_t count = p.v[0] & 0xFF;
+                if (p.v[0] & 0x100) v->adopting = v->nbins == 0;
+                for (uint32_t k = 0; k < count; k++) {
+                    const uint32_t bin = p.v[1 + k * 2] & 31;
+                    v->bin_mb[bin] = int32_t(p.v[2 + k * 2]);
+                    if (v->adopting && v->nbins < 8) v->bin[v->nbins++] = uint8_t(bin);
+                }
                 break;
+            }
         }
     }
 }
@@ -606,8 +685,70 @@ void Limit(float* out, uint32_t frames) {
     }
 }
 
+// MC3 diagnostic (2026-11-17): game:\audiodump.txt ("start seconds", from the mixer's start) writes the mix and two
+// groups of voices as raw 16 bit stereo 48 kHz files beside the game: dump_mix.raw (what goes out), dump_engine.raw
+// (one-channel ADPCM buffers on 7 mix bins, the engine's grains by their look) and dump_nobins.raw (buffers with no
+// mix bins). Off without the file.
+struct AudioDump {
+    bool read, on;
+    double start, secs;
+    uint64_t at;  // frames mixed so far
+    FILE* f[3];
+    std::vector<float> group[3];
+    AudioDump() : read(false), on(false), start(0), secs(0), at(0) { f[0] = f[1] = f[2] = NULL; }
+};
+AudioDump g_dump;
+int DumpGroup(const Voice& v) {
+    if (!v.stream && v.tag == 0x69 && v.channels == 1 && v.nbins == 7) return 1;
+    if (!v.stream && v.nbins == 0) return 2;
+    return 0;
+}
+void DumpWrite(FILE* f, const float* x, uint32_t frames) {
+    if (!f) return;
+    static int16_t b[2048 * 2];
+    for (uint32_t i = 0; i < frames * 2 && i < 4096; i++) {
+        const float v = x[i] * 32767.0f;
+        const int16_t s = int16_t(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : int(v));
+        b[i] = s;  // little endian on the PC side
+        b[i] = int16_t(uint16_t(s) >> 8 | uint16_t(s) << 8);
+    }
+    fwrite(b, 4, frames, f);
+}
+
 void Render(float* out, uint32_t frames) {
     std::memset(out, 0, frames * 2 * sizeof(float));
+    if (!g_dump.read) {
+        g_dump.read = true;
+        if (FILE* f = fopen("game:\\audiodump.txt", "rb")) {
+            char b[64] = {0};
+            fread(b, 1, sizeof(b) - 1, f);
+            fclose(f);
+            char* e = NULL;
+            g_dump.start = strtod(b, &e);
+            g_dump.secs = strtod(e, NULL);
+            if (g_dump.secs > 0) LOGW("dsound: audio dump from %.0f s for %.0f s (game:\\audiodump.txt, test)", g_dump.start, g_dump.secs);
+        }
+    }
+    const double now_s = double(g_dump.at) / audio::kRate;
+    g_dump.at += frames;
+    const bool dumping = g_dump.secs > 0 && now_s >= g_dump.start && now_s < g_dump.start + g_dump.secs;
+    if (dumping && !g_dump.on) {
+        g_dump.on = true;
+        g_dump.f[0] = fopen("game:\\dump_mix.raw", "wb");
+        g_dump.f[1] = fopen("game:\\dump_engine.raw", "wb");
+        g_dump.f[2] = fopen("game:\\dump_nobins.raw", "wb");
+    }
+    if (!dumping && g_dump.on) {
+        g_dump.on = false;
+        for (int k = 0; k < 3; k++)
+            if (g_dump.f[k]) {
+                fclose(g_dump.f[k]);
+                g_dump.f[k] = NULL;
+            }
+        LOGW("dsound: audio dump written");
+    }
+    if (dumping)
+        for (int k = 1; k < 3; k++) g_dump.group[k].assign(frames * 2, 0.0f);
     DsLock lock;
     MixHold hold;
     DrainPendLocked();
@@ -619,6 +760,10 @@ void Render(float* out, uint32_t frames) {
     for (std::map<uint32_t, Voice>::iterator it_ = g_voices.begin(); it_ != g_voices.end(); it_ = MixYield(it_)) {
         Voice& v = it_->second;
         if (v.paused || v.sync || v.hold || (!v.stream && !v.playing)) continue;
+        if (!v.stream && (v.flags & 0x2000)) {  // DSBCAPS_MIXIN: what it plays is what goes through it, not its memory
+            LOG_FIRST(8, "dsound: mix-in buffer %08X playing (%u bytes of its own): not mixed as a sound", v.obj, v.bytes);
+            continue;
+        }
         if (v.stream && v.packets.empty() && !v.active) continue;  // never started or gone quiet: no voice runs
         uint32_t base = v.data + v.play_start;
         // MC3 X-19: a buffer whose memory is not there is skipped and logged, not read (a fault in the mixer)
@@ -639,7 +784,9 @@ void Render(float* out, uint32_t frames) {
         float g[2][2];
         Levels(v, g);
         double hz = v.freq ? v.freq : v.rate;
-        double pitch = v.pitch_override ? v.pitch : 4096.0 * Log2(std::max(hz, 1.0) / 48000.0);
+        double pitch = (v.pitch_override ? v.pitch : 4096.0 * Log2(std::max(hz, 1.0) / 48000.0)) + (v.output ? MixInPitch(v) : 0);
+        if (pitch < -32767.0) pitch = -32767.0;
+        if (pitch > 8191.0) pitch = 8191.0;
         // envelopes and LFOs move on the hardware's 32 sample frames of output time, whatever the source rate;
         // a voice with none programmed keeps its rate and gain without stepping them (the console's cost here)
         const bool idle = v.mod.Idle();
@@ -647,6 +794,7 @@ void Render(float* out, uint32_t frames) {
         float gain = idle ? 1.0f : v.mod.gain;
         bool off = false;  // the amplitude envelope ended the voice
         float vpk = 0;     // this voice's loudest output sample in the block
+        const int dump_group = dumping ? DumpGroup(v) : 0;
         uint32_t i = 0;
         for (; i < frames; i++) {
             if (!idle) {
@@ -720,6 +868,10 @@ void Render(float* out, uint32_t frames) {
             const float l = a * g[0][0] + b * g[1][0], r = a * g[0][1] + b * g[1][1];
             out[i * 2] += l;
             out[i * 2 + 1] += r;
+            if (dump_group) {
+                g_dump.group[dump_group][i * 2] += l;
+                g_dump.group[dump_group][i * 2 + 1] += r;
+            }
             const float ml = l < 0 ? -l : l, mr = r < 0 ? -r : r;
             vpk = ml > vpk ? ml : vpk;
             vpk = mr > vpk ? mr : vpk;
@@ -744,9 +896,9 @@ void Render(float* out, uint32_t frames) {
         for (int k = 0; k < 3 && g_loud[k].peak > 0; k++) {
             const Voice* lv = Find(g_loud[k].obj);
             if (!lv) continue;
-            LOGI("dsound:   loud %d: obj=%08X peak %.2f %s tag %X %u ch %u Hz vol %.2f headroom %.2f bins %u 3d %d", k,
+            LOGI("dsound:   loud %d: obj=%08X peak %.2f %s tag %X %u ch %u Hz vol %.2f headroom %.2f bins %u 3d %d flags %08X", k,
                  g_loud[k].obj, double(g_loud[k].peak), lv->stream ? "stream" : "buffer", lv->tag, lv->channels, lv->rate,
-                 double(lv->volume), double(lv->headroom), unsigned(lv->nbins), int(lv->is3d || lv->voice3d.enabled));
+                 double(lv->volume), double(lv->headroom), unsigned(lv->nbins), int(lv->is3d || lv->voice3d.enabled), lv->flags);
             char bins[160];
             int o = 0;
             for (int q = 0; q < lv->nbins && o < 140; q++) o += sprintf(bins + o, " %u:%d", lv->bin[q], lv->bin_mb[lv->bin[q]]);
@@ -755,6 +907,27 @@ void Render(float* out, uint32_t frames) {
             Levels(*const_cast<Voice*>(lv), lg);
             LOGI("dsound:     bins (bin:mB)%s; gains L->(%.2f %.2f) R->(%.2f %.2f)", bins, double(lg[0][0]), double(lg[0][1]),
                  double(lg[1][0]), double(lg[1][1]));
+        }
+        // MC3 diagnostic (2026-11-17): with few voices playing (a menu), every one of them, what it plays and from where
+        {
+            unsigned np = 0;
+            for (std::map<uint32_t, Voice>::iterator it = g_voices.begin(); it != g_voices.end(); ++it) {
+                const Voice& pv = it->second;
+                const bool on = pv.stream ? pv.active && !pv.paused : pv.playing && !pv.paused;
+                if (on) np++;
+            }
+            static unsigned told = 0;
+            if (np && told < 120) {
+                told++;
+                for (std::map<uint32_t, Voice>::iterator it = g_voices.begin(); it != g_voices.end(); ++it) {
+                    const Voice& pv = it->second;
+                    const bool on = pv.stream ? pv.active && !pv.paused : pv.playing && !pv.paused;
+                    if (!on) continue;
+                    LOGI("dsound:   playing %08X %s tag %X %u ch %u Hz freq %u pitch %d%s vol %.3f data %08X+%u play %u+%u loop %u+%u looping %d pos %.0f packets %u flags %08X out %08X",
+                         pv.obj, pv.stream ? "stream" : "buffer", pv.tag, pv.channels, pv.rate, pv.freq, pv.pitch, pv.pitch_override ? " (set)" : "", double(pv.volume), pv.data, pv.bytes,
+                         pv.play_start, pv.play_len, pv.loop_start, pv.loop_len, int(pv.looping), pv.pos, unsigned(pv.packets.size()), pv.flags, pv.output);
+                }
+            }
         }
         memset(g_loud, 0, sizeof(g_loud));
         g_mix_peak = 0;
@@ -765,8 +938,16 @@ void Render(float* out, uint32_t frames) {
         diag_frames = 0;
         diag_max_playing = 0;
     }
+    // MC3 (2026-11-17): a master level before the limiter. With the mix-in routing the engines and the positioned sounds
+    // come up ~10 dB (as on the console) and the mix passed 2 to 5 in Xenia; the mc3port reference keeps 0.9 here
+    for (uint32_t i = 0; i < frames * 2; i++) out[i] *= 0.8f;
     Limit(out, frames);
     for (uint32_t i = 0; i < frames * 2; i++) out[i] = out[i] < -1.0f ? -1.0f : out[i] > 1.0f ? 1.0f : out[i];
+    if (dumping) {
+        DumpWrite(g_dump.f[0], out, frames);
+        DumpWrite(g_dump.f[1], &g_dump.group[1][0], frames);
+        DumpWrite(g_dump.f[2], &g_dump.group[2][0], frames);
+    }
 }
 
 DWORD g_flushed_tls = TlsAlloc();
@@ -852,6 +1033,7 @@ uint32_t NewBuffer(uint32_t desc, uint32_t out) {
     ReadFormat(v, R32(desc + 12));
     SetBins(v, R32(desc + 16));
     v.is3d = flags & 0x10;  // DSBCAPS_CTRL3D
+    v.flags = flags;
     v.headroom = DefaultHeadroom(flags);
     if (bytes) {
         v.data = v.owned = mem::AllocContiguous(bytes, 0, 0xFFFFFFFF, 4);
@@ -1164,6 +1346,7 @@ BUFFER(Release, 1) {
     LeaveCriticalSection(&g_pos_cs);
     ForgetPos(obj);
     g_voices.erase(obj);
+    ForgetOutput(obj);
     mem::FreeSystem(obj);
     return 0;
 }
@@ -1341,7 +1524,7 @@ void QueueBinVolumes(uint32_t obj, uint32_t mixbins) {
     uint32_t n = std::min<uint32_t>(R32(mixbins), 32), pairs = R32(mixbins + 4);
     for (uint32_t i = 0; i < n; i += 2) {
         uint32_t v[6] = {0, 0, 0, 0, 0, 0}, k = std::min<uint32_t>(n - i, 2);
-        v[0] = k;
+        v[0] = k | (i == 0 ? 0x100u : 0u);  // the first piece of the call (mix bin routing, DrainPendLocked)
         for (uint32_t j = 0; j < k; j++) v[1 + j * 2] = R32(pairs + (i + j) * 8), v[2 + j * 2] = R32(pairs + (i + j) * 8 + 4);
         QueuePend(obj, kPendBins, v, 1 + 2 * k);
     }
@@ -1385,7 +1568,21 @@ BUFFER(SetRolloffCurve, 4) {
     for (uint32_t i = 0; a[1] && i < std::min<uint32_t>(a[2], 64); i++) v.curve.push_back(F32(R32(a[1] + i * 4)));
     return 0;
 }
-BUFFER(SetOutputBuffer, 2) { return 0; }  // the voice keeps its own mix bins
+uint32_t SetOutput(Voice& v, uint32_t out) {
+    for (uint32_t m = out, depth = 0; m && depth < 8; depth++) {  // a loop back to this voice is refused
+        if (m == v.obj) return 0;
+        const Voice* mv = Find(m);
+        m = mv ? mv->output : 0;
+    }
+    v.output = out;
+    static unsigned told = 0;
+    if (out && told++ < 12) {
+        const Voice* mv = Find(out);
+        LOGI("dsound: %08X plays through mix-in %08X (flags %08X)", v.obj, out, mv ? mv->flags : 0);
+    }
+    return 0;
+}
+BUFFER(SetOutputBuffer, 2) { return SetOutput(v, a[1]); }
 BUFFER(SetFormat, 2) {
     ReadFormat(v, a[1]);
     v.freq = 0;
@@ -1417,6 +1614,7 @@ static uint32_t NewStream(uint32_t desc, uint32_t out) {
     v.context = R32(desc + 16);
     SetBins(v, R32(desc + 20));
     v.is3d = flags & 0x10;  // DSBCAPS_CTRL3D
+    v.flags = flags;
     v.headroom = DefaultHeadroom(flags);
     W32(out, obj);
     return 0;
@@ -1432,6 +1630,23 @@ HLE_STDCALL(IDirectSound_CreateSoundStream, 4) {  // this, desc, stream out, unk
     return NewStream(a[1], a[2]);
 }
 
+// MC3 diagnostic (2026-11-17): what the game does to a stereo stream (the music) - volume, mix bin volumes, pause,
+// flush, the end of a wave - up to 400 lines; the music with its volume at 0 or paused stutters on the console
+void MusicEvent(const Voice& v, const char* what, uint32_t a0, uint32_t a1) {
+    if (!v.stream || v.channels != 2) return;
+    static unsigned n = 0;
+    if (n >= 3000) return;
+    if (what[0] == 'S' && what[3] == 'V') {  // SetVolume: the game ramps it all the time, twice a second per stream at most
+        static std::map<uint32_t, int64_t> last;
+        const int64_t now = NowMs();
+        int64_t& l = last[v.obj];
+        if (now - l < 500) return;
+        l = now;
+    }
+    n++;
+    LOGI("dsmusic: %08X %s %08X %08X (active %d paused %d hold %d packets %u vol %.3f)", v.obj, what, a0, a1, int(v.active),
+         int(v.paused), int(v.hold), unsigned(v.packets.size()), double(v.volume));
+}
 #define STREAM(name, nargs)                                     \
     static uint32_t str_##name(Voice& v, const Args& a);        \
     HLE_STDCALL(CDirectSoundStream_##name, nargs) {             \
@@ -1477,7 +1692,7 @@ HLE_STDCALL(CDirectSoundStream_SetPitch, 2) {
     return 0;
 }
 STREAM(SetLFO, 2) { return SetLFO(v, a[1]); }
-STREAM(SetOutputBuffer, 2) { return 0; }  // the mixer folds every bus to stereo
+STREAM(SetOutputBuffer, 2) { return SetOutput(v, a[1]); }
 STREAM(SetFormat, 2) {
     FlushStream(v);
     ReadFormat(v, a[1]);
@@ -1492,6 +1707,7 @@ STREAM(Release, 1) {
     uint32_t obj = v.obj;
     ForgetPos(obj);
     g_voices.erase(obj);
+    ForgetOutput(obj);
     mem::FreeSystem(obj);
     return 0;
 }
@@ -1521,8 +1737,33 @@ STREAM(Process, 3) {
     uint32_t in = a[1];
     if (!in) return 0;
     Packet pk = {R32(in), R32(in + 4), R32(in + 8), R32(in + 12), R32(in + 16), 0};
+    // MC3 diagnostic (2026-11-17): silence inside a music packet. In the first pause menu the music stopped ~62 ms
+    // every 581 ms (a 510 ms packet each time) with packets queued and none late: zero frames at the start and the end
+    // of each 16 bit stereo packet, logged when over 10 ms
+    if (v.channels == 2 && v.tag == 1 && v.bits == 16 && pk.size >= 4 && mem::IsCommitted(pk.data) &&
+        mem::IsCommitted(pk.data + pk.size - 1)) {
+        const uint32_t* w = static_cast<const uint32_t*>(HostPtr(pk.data));
+        const uint32_t n = pk.size / 4;
+        uint32_t lead = 0, tail = 0;
+        while (lead < n && w[lead] == 0) lead++;
+        while (tail < n - lead && w[n - 1 - tail] == 0) tail++;
+        static unsigned told = 0;
+        const uint32_t lim = v.rate / 100;
+        if ((lead > lim || tail > lim) && told < 200) {
+            told++;
+            LOGI("dsmusic: %08X packet %08X+%u: %u zero frames at the start, %u at the end (%.0f / %.0f ms); queued %u",
+                 v.obj, pk.data, pk.size, lead, tail, 1000.0 * lead / v.rate, 1000.0 * tail / v.rate, unsigned(v.packets.size()));
+        }
+    }
     if (pk.completed_ptr) W32(pk.completed_ptr, 0);
     if (pk.status_ptr) W32(pk.status_ptr, kPacketPending);
+    if (v.stopped_by_flush) {  // FlushEx above: handed back unplayed until XACT starts the stream again
+        pk.used = 0;
+        Complete(v, pk, kFlushed);
+        static unsigned told = 0;
+        if (told++ < 8) LOGI("dsound: stream %08X stopped by a flush: packet of %u bytes handed back", v.obj, pk.size);
+        return 0;
+    }
     v.packets.push_back(pk);
     if (v.stopping) {
         static unsigned reported = 0;
@@ -1559,11 +1800,13 @@ STREAM(Process, 3) {
     return 0;
 }
 STREAM(Discontinuity, 1) {
+    MusicEvent(v, "Discontinuity", 0, 0);
     if (!v.packets.empty()) v.ending = true;
     else if (v.active) FlushStream(v);
     return 0;
 }
 STREAM(Flush, 1) {
+    MusicEvent(v, "Flush", 0, 0);
     FlushStream(v);
     return 0;
 }
@@ -1571,6 +1814,13 @@ STREAM(Flush, 1) {
 // the envelopes and keeps the packets playing, they complete as flushed when the release ends; ENVELOPE (2) alone
 // flushes them now, with the voice's data gone, and no flag flushes at once. ASYNC (1) only returns early.
 STREAM(FlushEx, 4) {
+    MusicEvent(v, "FlushEx", a[3], 0);
+    // MC3 (2026-11-18): XACT stops a song's stream with an asynchronous FlushEx (ASYNC, with ENVELOPE to fade it) and
+    // then goes on handing that stream packets, empty and full, until it starts it again with Pause. As on the console,
+    // and as the mc3port reference does (MIT, src/pc/dsound_hle.cpp, stopped_by_flush), those packets go back unplayed.
+    // Played, the menu's song came back over the race's at the start (two stereo streams fed for over 3 s in every log)
+    // and in the first pause menu, stuttering (console logs of 2026-11-17 21:13 and 2026-11-18 04:32)
+    if (a[3] & 7) v.stopped_by_flush = true;
     if (a[3] && !v.active) return 0;
     if (a[3] & 4) {
         v.mod.Release();
@@ -1587,6 +1837,8 @@ STREAM(FlushEx, 4) {
 // (0x40FED4) and starts it with RESUME when the cue plays (0x40F390). Playing such a stream at once made the next
 // song or a cutscene's stream sound over the current one (PC port). On a running stream PAUSENOACTIVATE resumes it.
 STREAM(Pause, 2) {
+    MusicEvent(v, "Pause", a[1], 0);
+    v.stopped_by_flush = false;  // XACT sets the stream up for its next sound
     switch (a[1]) {
     case 0:
         v.paused = v.sync = false;
@@ -1611,6 +1863,7 @@ STREAM(Pause, 2) {
     return 0x80004005u;
 }
 STREAM(SetVolume, 2) {
+    if (Db(int32_t(a[1])) != v.volume) MusicEvent(v, "SetVolume", a[1], 0);
     v.volume = Db(int32_t(a[1]));
     return 0;
 }
@@ -1631,6 +1884,16 @@ STREAM(SetHeadroom, 2) {
     return 0;
 }
 HLE_STDCALL(CDirectSoundStream_SetMixBinVolumes, 2) {
+    {
+        DsLock lock;
+        Voice* v = Find(a[0]);
+        static uint32_t last_first = 0x12345678;
+        const uint32_t first = a[1] && R32(a[1]) ? R32(R32(a[1] + 4) + 4) : 0;
+        if (v && first != last_first) {
+            last_first = first;
+            MusicEvent(*v, "SetMixBinVolumes (first)", a[1] ? R32(a[1]) : 0, first);
+        }
+    }
     QueueBinVolumes(a[0], a[1]);
     return 0;
 }

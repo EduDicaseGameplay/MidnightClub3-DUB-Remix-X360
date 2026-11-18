@@ -32,7 +32,11 @@ Third party work used in this port
 
 2. mc3port (SickSartori), MIT License.
    The WMA music decoder fix in x360/runtime/game/mc3.cpp (an overlap-add loop with a block count of 0) follows the
-   cause it found. The bytes were checked again in this XBE.
+   cause it found. The bytes were checked again in this XBE. In x360/runtime/xdk/dsound.cpp, the routing of a voice
+   through its mix-in buffer (SetOutputBuffer: the mix-in's volume, bins and pitch, its 10 dB level and the stereo to
+   mono half), a voice made without mix bins taking them from its first SetMixBinVolumes, and a stream stopped by an
+   asynchronous FlushEx handing packets back until Pause follow its src/pc/audio_gains.h and src/pc/dsound_hle.cpp,
+   written again for this runtime.
 
 3. JSRF Unleashed (https://github.com/JuMatt/JetSetRadioFuture-Unleashed), MIT License, Copyright (c) 2026 sp00nz.
    The runtime comes from my Jet Set Radio Future port, where the idea of running one game thread at a time
