@@ -12,6 +12,7 @@
 // after it, as the game's own settling loop at the start of a race does (0x1D9E0: the simulator, then 0xFF320 for
 // every car of the list [0x534074] and every one the manager [0x558814] has through 0x2BD920 / 0x2BF570). The frame
 // time 0x4B2D70 (timers, animation, camera) keeps the whole step.
+#include <stdio.h>
 #include <string.h>
 
 #include "cpu/x86_ops.h"
@@ -67,6 +68,121 @@ void ExtraStep(X86Context& ctx) {
 }
 }  // namespace
 
+// MC3 (2026-11-18): the garage's settling loops. When a car is put on show (bought, picked, painted, the garage
+// entered), the game drops it onto the floor by running the simulator and that car's step 60 times in a row
+// (0x14E090, 0x14E200, 0x151664, 0x152FC0, 0x1CFC10: "mov edi, 0x3C", 0x29D210 then 0xFF320, dec, jnz). On the console
+// the physics step 0x4B2D48 was the fixed 1/60 there; here it holds the last frame's time (up to 0.1 s, the garage
+// runs at 15 to 20 fps on the console): 60 steps of 0.1 s left the car sunk into the floor and smoking (console video
+// of 2026-11-18 18:50). So these calls get the game's own step, and the step goes back after each.
+extern float g_mc3_original_step;  // game/mc3_timing.cpp: 1 / (rate * substeps) the game asked for
+namespace {
+bool SettleRet(uint32_t r) {
+    switch (r) {
+    case 0x0014E09B: case 0x0014E20B: case 0x0015166F: case 0x00152FCB: case 0x001CFC1B:  // simulator
+    case 0x0014E0AD: case 0x0014E21D: case 0x00151681: case 0x00152FDD: case 0x001CFC3C:  // the car's step
+        return true;
+    }
+    return false;
+}
+uint32_t g_settle_calls = 0;
+float g_settle_was = 0;
+struct FixedStep {
+    uint32_t a, b;
+    bool on;
+    explicit FixedStep(uint32_t ret) : a(0), b(0), on(false) {
+        if (!SettleRet(ret)) return;
+        const float step = g_mc3_original_step > 0 && g_mc3_original_step < 0.05f ? g_mc3_original_step : 1.0f / 60;
+        a = R32(0x4B2D48);
+        b = R32(0x4B2D50);
+        memcpy(&g_settle_was, &a, 4);
+        uint32_t s, i;
+        const float inv = 1.0f / step;
+        memcpy(&s, &step, 4);
+        memcpy(&i, &inv, 4);
+        kernel::W32(0x4B2D48, s);
+        kernel::W32(0x4B2D50, i);
+        on = true;
+        g_settle_calls++;
+    }
+    ~FixedStep() {
+        if (!on) return;
+        kernel::W32(0x4B2D48, a);
+        kernel::W32(0x4B2D50, b);
+    }
+};
+}  // namespace
+// MC3 (2026-11-18): who calls the clock, the simulator, a car's step and the vehicle manager, every 10 s in the log
+struct RetHist {
+    const char* name;
+    uint32_t ret[12], n[12];
+    void Add(uint32_t r) {
+        for (int i = 0; i < 12; i++) {
+            if (n[i] && ret[i] == r) { n[i]++; return; }
+            if (!n[i]) { ret[i] = r; n[i] = 1; return; }
+        }
+    }
+    void Dump() {
+        char b[400];
+        int o = 0;
+        for (int i = 0; i < 12 && n[i] && o < 360; i++) o += sprintf(b + o, " %X:%u", ret[i], n[i]);
+        if (o) LOGI("calls: %s from%s", name, b);
+        memset(ret, 0, sizeof(ret));
+        memset(n, 0, sizeof(n));
+    }
+};
+RetHist g_h_clock = {"clock"}, g_h_sim = {"simulator"}, g_h_car = {"car step"}, g_h_vm = {"vehicle manager"};
+static void HistReport();
+void Mc3CountClock(uint32_t r) {
+    g_h_clock.Add(r);
+    HistReport();
+}
+static void HistReport() {
+    static int64_t at = 0;
+    const int64_t now = host::NowNs();
+    if (!at) at = now + 10000000000ll;
+    if (now < at) return;
+    at = now + 10000000000ll;
+    g_h_clock.Dump();
+    g_h_sim.Dump();
+    g_h_car.Dump();
+    g_h_vm.Dump();
+    if (g_settle_calls) {
+        LOGI("physics: %u settling calls on the game's own step (the step there was %.4f s)", g_settle_calls, double(g_settle_was));
+        g_settle_calls = 0;
+    }
+}
+X86_EXTERN_FUNC(__imp__sub_0029D210);
+X86_FUNC(sub_0029D210) {
+    g_h_sim.Add(R32(ctx.esp));
+    FixedStep f(R32(ctx.esp));
+    __imp__sub_0029D210(ctx, base);
+}
+X86_EXTERN_FUNC(__imp__sub_000FF320);
+X86_FUNC(sub_000FF320) {
+    g_h_car.Add(R32(ctx.esp));
+    FixedStep f(R32(ctx.esp));
+    __imp__sub_000FF320(ctx, base);
+    HistReport();
+}
+
+// MC3 (2026-11-18): one more step of the garage's and the results screen's world update (0x1EBF0): the simulator, then
+// the vehicle manager, as 0x1EBFC..0x1EC12. The garage's car is stepped by the vehicle manager (0xFEF80 -> 0x35DA80),
+// not by 0xFF320 (none in the garage, console log 2026-11-18 20:23, "calls:"): with ExtraStep the simulator ran 3 times
+// a frame and the car's own forces once, and the cars on show sank into the floor and shook. The manager's hook below
+// sees these calls come back to 0xFFFFFFF0, not a frame's own, and passes them through.
+static void ExtraStepWithManager(X86Context& ctx) {
+    const uint32_t sim = R32(kSimulator);
+    if (sim) {
+        ctx.ecx = sim;
+        kernel::CallGuest(ctx, 0x0029D210);
+    }
+    const uint32_t vm = R32(kAiManager);
+    if (vm) {
+        ctx.ecx = vm;
+        kernel::CallGuest(ctx, 0x002BDEC0);
+    }
+}
+
 // the vehicle manager's update; the second call of the frame (0x1EEFC) ends the frame's physics
 X86_EXTERN_FUNC(__imp__sub_002BDEC0);
 // MC3 (2026-11-17): what the physics costs, every 10 s in the log: the frame's own pass (first vehicle manager call to
@@ -113,6 +229,8 @@ static void LeaveSub() {
 }
 X86_FUNC(sub_002BDEC0) {
     const uint32_t ret = R32(ctx.esp);
+    g_h_vm.Add(ret);
+    HistReport();
     const bool last = ret == kSecondVehicleUpdate || ret == kOnlyVehicleUpdate;
     if (ret == kFirstVehicleUpdate) g_first_calls++;
     if (last) {
@@ -138,7 +256,12 @@ X86_FUNC(sub_002BDEC0) {
             g_mc3_phys_substeps = 1;
         }
         const int64_t te = host::NowNs();
-        for (int i = 0; i < extra; i++) ExtraStep(ctx);
+        for (int i = 0; i < extra; i++) {
+            if (ret == kOnlyVehicleUpdate)
+                ExtraStepWithManager(ctx);
+            else
+                ExtraStep(ctx);
+        }
         g_extra_ns += host::NowNs() - te;
         g_extra_steps += uint32_t(extra);
         ctx.eax = eax;

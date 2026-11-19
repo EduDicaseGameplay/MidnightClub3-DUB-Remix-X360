@@ -32,6 +32,8 @@ using kernel::W32;
 extern int g_mc3_phys_substeps;  // game/mc3_physics.cpp
 extern uint32_t g_mc3_phys_sub[2];
 void Mc3PhysEnterSub();
+void Mc3CountClock(uint32_t ret);
+float g_mc3_original_step = 0;  // the game's own step, for game/mc3_physics.cpp
 
 namespace {
 const uint32_t kPrevTick = 0x534778;   // time stamp low dword at the last update (733.33 MHz)
@@ -251,6 +253,7 @@ X86_FUNC(sub_0020BB00) {
     const uint32_t substeps = R32(ctx.esp + 8);
     __imp__sub_0020BB00(ctx, base);
     g_original_step = Float(R32(kStep));
+    g_mc3_original_step = g_original_step;
     g_carry = 0;
     LOGI("timing: the game asked for a fixed step, rate %.2f, substeps %u: step %.5f s", rate, substeps, g_original_step);
 }
@@ -428,6 +431,7 @@ X86_FUNC(sub_0020B6F0) {
         Sleep(DWORD(SlowMs()));
     }
     const uint32_t clock_ret = R32(ctx.esp);
+    Mc3CountClock(clock_ret);
     uint32_t now = uint32_t(x86_rdtsc());
     double measured = double(uint32_t(now - R32(kPrevTick))) / kTicksPerSecond;
     const bool fixed = R32(kFixedStep) != 0 && g_original_step > 0 && g_original_step < 0.2f;

@@ -795,6 +795,11 @@ void Render(float* out, uint32_t frames) {
         bool off = false;  // the amplitude envelope ended the voice
         float vpk = 0;     // this voice's loudest output sample in the block
         const int dump_group = dumping ? DumpGroup(v) : 0;
+        // MC3 (2026-11-18): a one-channel voice (engines, traffic, effects: most of them) read its sample twice a frame,
+        // the second time for a channel it does not have (its gains there are 0). Console, heavy traffic: 36 to 40
+        // voices, the mixer holding the sound lock 52% of the time and the game's threads waiting for it up to 30 ms
+        // a second (log of 2026-11-18 06:50)
+        const bool mono = v.channels == 1;
         uint32_t i = 0;
         for (; i < frames; i++) {
             if (!idle) {
@@ -832,13 +837,13 @@ void Render(float* out, uint32_t frames) {
                 }
                 Packet& pk = v.packets.front();
                 a = Sample(v, pk.data, f, 0);
-                b = Sample(v, pk.data, f, 1);
+                b = mono ? a : Sample(v, pk.data, f, 1);
                 if (f + 1 < FramesOf(v, pk.size)) {
                     a1 = Sample(v, pk.data, f + 1, 0);
-                    b1 = Sample(v, pk.data, f + 1, 1);
+                    b1 = mono ? a1 : Sample(v, pk.data, f + 1, 1);
                 } else if (v.packets.size() > 1) {
                     a1 = Sample(v, v.packets[1].data, 0, 0);
-                    b1 = Sample(v, v.packets[1].data, 0, 1);
+                    b1 = mono ? a1 : Sample(v, v.packets[1].data, 0, 1);
                 } else {
                     a1 = a;
                     b1 = b;
@@ -857,10 +862,10 @@ void Render(float* out, uint32_t frames) {
                 }
                 if (!v.data) break;
                 a = Sample(v, base, f, 0);
-                b = Sample(v, base, f, 1);
+                b = mono ? a : Sample(v, base, f, 1);
                 uint32_t next = f + 1 < end ? f + 1 : v.looping ? start : f;
                 a1 = Sample(v, base, next, 0);
-                b1 = Sample(v, base, next, 1);
+                b1 = mono ? a1 : Sample(v, base, next, 1);
             }
             float t = float(v.pos - f);
             a = (a + (a1 - a) * t) * gain;

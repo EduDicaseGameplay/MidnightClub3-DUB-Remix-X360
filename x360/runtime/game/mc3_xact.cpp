@@ -19,9 +19,19 @@
 namespace {
 int64_t g_last_ns = 0;
 uint32_t g_extra = 0, g_calls = 0;
-int64_t g_report_ns = 0;
+int64_t g_report_ns = 0, g_first_ns = 0, g_extra_ns = 0;  // time in the first run and in the extra ones
 bool g_inside = false;
+// MC3 (2026-11-18): the engine's part (0x407320); the rest is DirectSound's work (0x3C22EC, DirectSoundDoWork, which the
+// runtime replaces: not hooked here, a hook calling the game's own code froze the boot in Xenia)
+int64_t g_engine_ns = 0;
 }  // namespace
+
+X86_EXTERN_FUNC(__imp__sub_00407320);
+X86_FUNC(sub_00407320) {
+    const int64_t t0 = host::NowNs();
+    __imp__sub_00407320(ctx, base);
+    g_engine_ns += host::NowNs() - t0;
+}
 
 X86_EXTERN_FUNC(__imp__sub_004073D9);
 X86_FUNC(sub_004073D9) {
@@ -41,7 +51,9 @@ X86_FUNC(sub_004073D9) {
     const uint32_t esp = ctx.esp;
     for (int i = 0; i < runs; i++) {
         ctx.esp = esp;  // the same call again, as the caller made it (no arguments, cdecl)
+        const int64_t t0 = host::NowNs();
         __imp__sub_004073D9(ctx, base);
+        (i ? g_extra_ns : g_first_ns) += host::NowNs() - t0;
         if (i + 1 < runs) {
             // __imp_ returned (popped its return address): put it back for the next run
             ctx.esp = esp;
@@ -52,8 +64,13 @@ X86_FUNC(sub_004073D9) {
     g_extra += uint32_t(runs - 1);
     if (!g_report_ns) g_report_ns = now;
     if (now - g_report_ns >= 10000000000ll) {
-        LOGI("xact: %u calls of the engine's work in 10 s, %u more run for long frames", g_calls, g_extra);
+        LOGI("xact: %u calls of the engine's work in 10 s (%.1f ms), %u more run for long frames (%.1f ms); of all, "
+             "the engine (songs, cues) %.1f ms, DirectSound's work and the rest %.1f ms", g_calls,
+             double(g_first_ns) / 1e6, g_extra, double(g_extra_ns) / 1e6, double(g_engine_ns) / 1e6,
+             double(g_first_ns + g_extra_ns - g_engine_ns) / 1e6);
         g_calls = g_extra = 0;
+        g_first_ns = g_extra_ns = 0;
+        g_engine_ns = 0;
         g_report_ns = now;
     }
 }
