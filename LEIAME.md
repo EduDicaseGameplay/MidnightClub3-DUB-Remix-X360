@@ -17,6 +17,7 @@ Não é emulador nem retrocompatibilidade. O código x86 do jogo é traduzido pa
 - A música acompanha mesmo com fps baixo, a música do menu não toca mais por cima da corrida e os sons saem com menos atraso.
 - O mixer de som lê cada voz mono uma vez só por amostra, o que o deixou uns 28% mais leve no console. Isso ajuda principalmente nas ruas movimentadas, onde tocam 20 sons ou mais ao mesmo tempo.
 - Os carros da garagem voltaram a ficar no chão. Antes eles afundavam e tremiam: a garagem rodava os passos extras de física só no mundo, sem a atualização do próprio carro, e a gravidade vencia a suspensão. Agora cada passo extra roda os dois, e os 60 passos que o jogo usa para assentar um carro na vitrine usam o 1/60 de segundo original.
+- O decodificador de música (WMA) ficou mais leve: as partes mais pesadas agora rodam em código nativo, com o mesmo resultado do original. No console cada bloco de música custa mais ou menos a metade, então os menus, a garagem e a troca de música engasgam bem menos.
 - O desempenho no console está na tabela abaixo.
 - Os vídeos de abertura (Rockstar, Rockstar San Diego e a abertura do jogo) tocam, assim como os vídeos tutoriais.
 - Ainda não testei no console a carreira inteira, salvar e carregar, nem os replays.
@@ -28,9 +29,9 @@ Medido no meu console RGH, em 720p, com o `trafego.txt` e o `lod.txt` padrão. O
 | Onde | FPS |
 |---|---|
 | Menus e telas de abertura | 20 a 30 |
-| Ruas leves (áreas abertas, pouca coisa em volta) | 13 a 15 |
-| Ruas médias | 10 a 12 |
-| Ruas pesadas (centro, muitos prédios e trânsito) | 8 a 10 |
+| Ruas leves (áreas abertas, pouca coisa em volta) | 15 a 18 |
+| Ruas médias | 12 a 15 |
+| Ruas pesadas (centro, muitos prédios e trânsito) | 9 a 11 |
 
 O jogo foi feito para 30 fps no Xbox original. Aqui o limite é o processador: o código x86 traduzido roda mais devagar no PowerPC do 360 do que o original rodava no processador dele. A física em passos curtos custa alguns milissegundos por quadro, mas é o que mantém os carros estáveis e o controle certo com o tempo real.
 

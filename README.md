@@ -17,6 +17,7 @@ It's not an emulator and it's not backward compatibility. The game's x86 code is
 - The music keeps up even at a low frame rate, the menu's song no longer plays over the race's, and sounds come out with less delay.
 - The sound mixer reads each mono voice only once per sample, which made it about 28% lighter on the console. That helps most on busy streets, where 20 or more sounds play at once.
 - The cars in the garage sit on the floor again. Before, they sank into it and shook: the garage ran its extra physics steps on the world only, without the car's own update, so gravity won over the suspension. Each extra step now runs both, and the 60 steps the game uses to settle a car on show use the original 1/60 of a second.
+- The music decoder (WMA) is lighter: its heaviest parts now run as native code, with the same result as the original. On the console each block of music costs about half of what it did, so menus, the garage and song changes stutter much less.
 - Performance on a real console is in the table below.
 - The intro videos at boot (Rockstar, Rockstar San Diego and the game's opening) play, and so do the tutorial videos.
 - I haven't tested the whole career, saving and loading, or replays on the console yet.
@@ -28,9 +29,9 @@ Measured on my RGH console, 720p, with the default `trafego.txt` and `lod.txt`. 
 | Where | FPS |
 |---|---|
 | Menus and boot screens | 20 to 30 |
-| Light streets (open areas, little around) | 13 to 15 |
-| Medium streets | 10 to 12 |
-| Heavy streets (downtown, many buildings and traffic) | 8 to 10 |
+| Light streets (open areas, little around) | 15 to 18 |
+| Medium streets | 12 to 15 |
+| Heavy streets (downtown, many buildings and traffic) | 9 to 11 |
 
 The game was made for 30 fps on the original Xbox. Here the CPU is the limit: the translated x86 code runs slower on the 360's PowerPC than the original did on its own CPU. The short physics steps cost a few milliseconds per frame, but they're what keeps the cars stable and the controls right in real time.
 

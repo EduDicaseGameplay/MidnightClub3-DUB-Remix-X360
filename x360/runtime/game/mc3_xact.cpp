@@ -11,6 +11,9 @@
 //
 // An earlier try (handing music packets back half way, from a copy) froze the game in Xenia: XACT spins on its own
 // packet accounting. This leaves the packets alone and only gives XACT its time.
+#include <stdio.h>
+#include <string.h>
+
 #include "cpu/x86_ops.h"
 #include "core/log.h"
 #include "kernel/kernel.h"
@@ -31,6 +34,111 @@ X86_FUNC(sub_00407320) {
     const int64_t t0 = host::NowNs();
     __imp__sub_00407320(ctx, base);
     g_engine_ns += host::NowNs() - t0;
+}
+
+// MC3 (2026-11-19): the WMA decoder's block-level functions, timed (inclusive; each runs a few hundred times in 10 s)
+namespace {
+const char* const kWmaNames[] = {"4288BC", "428DAB", "42DD91", "42A2D4", "42A37F", "42A756", "42F5CC", "42B5C2", "42A972", "42D66A"};
+}  // namespace
+int64_t g_mc3_wma_ns[10];  // also used by game/mc3_imdct.cpp
+uint32_t g_mc3_wma_calls[10];
+X86_EXTERN_FUNC(__imp__sub_004288BC);
+X86_FUNC(sub_004288BC) {
+    const int64_t t0 = host::NowNs();
+    __imp__sub_004288BC(ctx, base);
+    g_mc3_wma_ns[0] += host::NowNs() - t0;
+    g_mc3_wma_calls[0]++;
+}
+X86_EXTERN_FUNC(__imp__sub_00428DAB);
+X86_FUNC(sub_00428DAB) {
+    const int64_t t0 = host::NowNs();
+    __imp__sub_00428DAB(ctx, base);
+    g_mc3_wma_ns[1] += host::NowNs() - t0;
+    g_mc3_wma_calls[1]++;
+}
+X86_EXTERN_FUNC(__imp__sub_0042DD91);
+X86_FUNC(sub_0042DD91) {
+    const int64_t t0 = host::NowNs();
+    __imp__sub_0042DD91(ctx, base);
+    g_mc3_wma_ns[2] += host::NowNs() - t0;
+    g_mc3_wma_calls[2]++;
+}
+X86_EXTERN_FUNC(__imp__sub_0042A2D4);
+X86_FUNC(sub_0042A2D4) {
+    const int64_t t0 = host::NowNs();
+    __imp__sub_0042A2D4(ctx, base);
+    g_mc3_wma_ns[3] += host::NowNs() - t0;
+    g_mc3_wma_calls[3]++;
+}
+// 0x42A37F: native in game/mc3_wma.cpp, which times itself in slot 4
+X86_EXTERN_FUNC(__imp__sub_0042A756);
+X86_FUNC(sub_0042A756) {
+    const int64_t t0 = host::NowNs();
+    __imp__sub_0042A756(ctx, base);
+    g_mc3_wma_ns[5] += host::NowNs() - t0;
+    g_mc3_wma_calls[5]++;
+}
+// 0x42F5CC: native in game/mc3_imdct.cpp, which times itself in slot 6
+// 0x42B5C2: native in game/mc3_imdct.cpp, which times itself in slot 7
+X86_EXTERN_FUNC(__imp__sub_0042A972);
+X86_FUNC(sub_0042A972) {
+    const int64_t t0 = host::NowNs();
+    __imp__sub_0042A972(ctx, base);
+    g_mc3_wma_ns[8] += host::NowNs() - t0;
+    g_mc3_wma_calls[8]++;
+}
+
+// MC3 (2026-11-19): the WMA media object's Process (vtable 0x4A5594 slot 4: this, in packet, out packet; ret 0xC) and
+// Flush (slot 6). Console log 2026-11-19 04:42: the decoder ran in bursts (1547 blocks, 2.5 s, in one 10 s window, fps
+// 4.6) when the garage's song changed. Who asks, and for how much.
+namespace {
+uint32_t g_proc_calls = 0, g_proc_flush = 0, g_proc_slow = 0;
+uint64_t g_proc_bytes = 0;
+uint32_t g_proc_max = 0;
+int64_t g_proc_ns = 0;
+uint32_t g_proc_ret[8], g_proc_retn[8];
+}  // namespace
+X86_EXTERN_FUNC(__imp__sub_00425F87);
+X86_FUNC(sub_00425F87) {
+    const uint32_t esp = ctx.esp;
+    const uint32_t ret = kernel::R32(esp), self = kernel::R32(esp + 4), out = kernel::R32(esp + 12);
+    const uint32_t size = out ? kernel::R32(out + 4) : 0;
+    const int64_t t0 = host::NowNs();
+    __imp__sub_00425F87(ctx, base);
+    const int64_t dt = host::NowNs() - t0;
+    g_proc_ns += dt;
+    g_proc_calls++;
+    g_proc_bytes += size;
+    if (size > g_proc_max) g_proc_max = size;
+    for (int i = 0; i < 8; i++) {
+        if (g_proc_ret[i] == ret || !g_proc_ret[i]) { g_proc_ret[i] = ret; g_proc_retn[i]++; break; }
+    }
+    if (dt > 30000000ll && g_proc_slow < 12) {
+        g_proc_slow++;
+        // the caller's frame chain: ebp at entry is the caller's frame
+        LOGI("wma process: slow call %.1f ms, object %08X, %u bytes asked, from %08X (frames %08X %08X %08X)",
+             double(dt) / 1e6, self, size, ret, kernel::R32(ctx.ebp + 4), kernel::R32(kernel::R32(ctx.ebp) + 4),
+             kernel::R32(kernel::R32(kernel::R32(ctx.ebp)) + 4));
+    }
+}
+X86_EXTERN_FUNC(__imp__sub_00425F23);
+X86_FUNC(sub_00425F23) {
+    g_proc_flush++;
+    LOGI("wma process: flush of object %08X from %08X", kernel::R32(ctx.esp + 4), kernel::R32(ctx.esp));
+    __imp__sub_00425F23(ctx, base);
+}
+static void ReportProcess() {
+    if (!g_proc_calls && !g_proc_flush) return;
+    char sb[200];
+    int so = 0;
+    for (int i = 0; i < 8 && g_proc_ret[i]; i++) so += sprintf(sb + so, " %08X:%u", g_proc_ret[i], g_proc_retn[i]);
+    LOGI("wma process: %u calls in 10 s (%.1f ms), %llu KB asked, the largest %u bytes, %u flushes; from%s", g_proc_calls,
+         double(g_proc_ns) / 1e6, (unsigned long long)(g_proc_bytes / 1024), g_proc_max, g_proc_flush, sb);
+    g_proc_calls = g_proc_flush = g_proc_slow = g_proc_max = 0;
+    g_proc_bytes = 0;
+    g_proc_ns = 0;
+    memset(g_proc_ret, 0, sizeof(g_proc_ret));
+    memset(g_proc_retn, 0, sizeof(g_proc_retn));
 }
 
 X86_EXTERN_FUNC(__imp__sub_004073D9);
@@ -71,6 +179,16 @@ X86_FUNC(sub_004073D9) {
         g_calls = g_extra = 0;
         g_first_ns = g_extra_ns = 0;
         g_engine_ns = 0;
+        {
+            char sb[400];
+            int so = 0;
+            for (int i = 0; i < int(sizeof(g_mc3_wma_ns) / sizeof(g_mc3_wma_ns[0])) && so < 360; i++)
+                if (g_mc3_wma_calls[i]) so += sprintf(sb + so, " %s:%u %.1f", kWmaNames[i], g_mc3_wma_calls[i], double(g_mc3_wma_ns[i]) / 1e6);
+            if (so) LOGI("xact: wma blocks (calls, ms):%s", sb);
+            memset(g_mc3_wma_ns, 0, sizeof(g_mc3_wma_ns));
+            memset(g_mc3_wma_calls, 0, sizeof(g_mc3_wma_calls));
+        }
+        ReportProcess();
         g_report_ns = now;
     }
 }
